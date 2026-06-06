@@ -1,24 +1,50 @@
 {
   "name": "PiutangKu — Buku Piutang Digital",
   "short_name": "PiutangKu",
-  "description": "Lacak debitur, pinjaman, pembayaran, dan sisa piutang dalam satu tempat. Sederhana, offline, dan bisa di-backup lewat file JSON.",
+  "description": "Lacak debitur, pinjaman, pembayaran, dan sisa piutang dalam satu tempat.",
   "lang": "id",
   "dir": "ltr",
-  "start_url": ".",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#FAFAF7",
+  "background_color": "#FFFFFF",
   "theme_color": "#8FDCC2",
-  "categories": ["finance", "productivity", "utilities"],
-  "icons": [
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  "categories": [
+    "finance",
+    "productivity",
+    "business"
   ],
-  "shortcuts": [
-    { "name": "Tambah Pinjaman", "short_name": "Pinjaman", "url": "./#/tambah-pinjaman" },
-    { "name": "Tambah Peminjam", "short_name": "Peminjam", "url": "./#/tambah-peminjam" },
-    { "name": "Statistik", "short_name": "Statistik", "url": "./#/statistik" }
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
   ]
 }
