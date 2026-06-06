@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <!-- Document: deep forest green gradient -->
+    <linearGradient id="gDoc" x1="0%" y1="0%" x2="90%" y2="100%">
+      <stop offset="0%" stop-color="#2D4A3E"/>
+      <stop offset="100%" stop-color="#192B21"/>
+    </linearGradient>
+    <!-- Bill: bright mint to deep green -->
+    <linearGradient id="gBill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#4EC4A0"/>
+      <stop offset="100%" stop-color="#267A64"/>
+    </linearGradient>
+    <!-- Pencil body: light mint -->
+    <linearGradient id="gPencil" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#B8F0DE"/>
+      <stop offset="100%" stop-color="#7AD0B8"/>
+    </linearGradient>
+    <!-- Clip badge: solid accent green -->
+    <!-- Medallion: deep interior green -->
+    <radialGradient id="gMedallion" cx="40%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#2A8070"/>
+      <stop offset="100%" stop-color="#174D3E"/>
+    </radialGradient>
+    <!-- Drop shadow for document -->
+    <filter id="fShadow" x="-16%" y="-10%" width="138%" height="132%">
+      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#060E09" flood-opacity="0.42"/>
+    </filter>
+    <!-- Slight inner glow/highlight top of doc -->
+    <linearGradient id="gDocSheen" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="white" stop-opacity="0.07"/>
+      <stop offset="100%" stop-color="white" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- ══════════════ DOCUMENT BODY ══════════════ -->
+  <rect x="88" y="56" width="336" height="400" rx="52" fill="url(#gDoc)" filter="url(#fShadow)"/>
+  <!-- Top sheen -->
+  <rect x="88" y="56" width="336" height="200" rx="52" fill="url(#gDocSheen)"/>
+
+  <!-- ══════════════ CLIPBOARD CLIP (top center) ══════════════ -->
+  <rect x="192" y="38" width="128" height="42" rx="21" fill="#2F8169"/>
+  <!-- Clip hole -->
+  <ellipse cx="256" cy="40" rx="22" ry="13" fill="#13221A" opacity="0.9"/>
+  <!-- Clip screw dots -->
+  <circle cx="222" cy="56" r="4" fill="#3DA382" opacity="0.6"/>
+  <circle cx="290" cy="56" r="4" fill="#3DA382" opacity="0.6"/>
+
+  <!-- ══════════════ PENCIL (mint, over top-left of document) ══════════════ -->
+  <!-- Center at world (120, 106), rotated −45° (CCW). 
+       Tip lands ≈ (219, 205), eraser top ≈ (40, 24) -->
+  <g transform="translate(120,106) rotate(-45)">
+    <!-- Eraser cap -->
+    <rect x="-17" y="-112" width="34" height="34" rx="11" fill="#FFB38A"/>
+    <!-- Eraser highlight -->
+    <rect x="-10" y="-112" width="8" height="34" rx="4" fill="white" opacity="0.18"/>
+    <!-- Metal ferrule ring -->
+    <rect x="-17" y="-79" width="34" height="17" rx="1" fill="#5CBEA6"/>
+    <!-- Ferrule shadow stripe -->
+    <rect x="-17" y="-71" width="34" height="5" fill="#3DA382" opacity="0.45"/>
+    <!-- Pencil body (hexagonal → rect with radius) -->
+    <rect x="-17" y="-62" width="34" height="152" rx="6" fill="url(#gPencil)"/>
+    <!-- Body glossy shine (left face lit) -->
+    <rect x="-11" y="-62" width="7" height="152" rx="3.5" fill="white" opacity="0.24"/>
+    <!-- Body right shadow -->
+    <rect x="10" y="-62" width="7" height="152" rx="3.5" fill="#2F8169" opacity="0.10"/>
+    <!-- Wood cone section (warmer tone before tip) -->
+    <rect x="-17" y="90" width="34" height="22" rx="4" fill="#D8AC76"/>
+    <!-- Wood highlight -->
+    <rect x="-11" y="90" width="7" height="22" rx="2" fill="white" opacity="0.14"/>
+    <!-- Graphite tip (sharp triangle) -->
+    <polygon points="-17,112 17,112 0,143" fill="#1E2E28"/>
+    <!-- Graphite core/center highlight -->
+    <polygon points="-2.5,112 2.5,112 0,143" fill="#8AACA4" opacity="0.40"/>
+  </g>
+
+  <!-- ══════════════ RUPIAH BILL / NOTE ══════════════ -->
+  <rect x="110" y="192" width="292" height="158" rx="26" fill="url(#gBill)"/>
+  <!-- Bill inner border frame -->
+  <rect x="123" y="205" width="266" height="132" rx="17" fill="none" stroke="#B8EDD8" stroke-width="2.5" opacity="0.46"/>
+  <!-- Bill subtle horizontal center line -->
+  <line x1="123" y1="271" x2="389" y2="271" stroke="#B8EDD8" stroke-width="1" opacity="0.18"/>
+
+  <!-- Center medallion rings -->
+  <circle cx="256" cy="271" r="60" fill="#237060"/>
+  <circle cx="256" cy="271" r="50" fill="url(#gMedallion)"/>
+  <circle cx="256" cy="271" r="49" fill="none" stroke="#8FDCC2" stroke-width="1.8" opacity="0.35"/>
+  <!-- Inner ring detail -->
+  <circle cx="256" cy="271" r="44" fill="none" stroke="#8FDCC2" stroke-width="1" opacity="0.18"/>
+
+  <!-- "Rp" denomination text -->
+  <text x="256" y="288"
+    text-anchor="middle"
+    font-family="'Arial Black', 'Helvetica Neue', Arial, sans-serif"
+    font-weight="900"
+    font-size="44"
+    fill="white"
+    letter-spacing="-1">Rp</text>
+
+  <!-- Corner ornament dots on bill (classic banknote style) -->
+  <circle cx="150" cy="222" r="13" fill="#1C5C4C" opacity="0.82"/>
+  <circle cx="362" cy="222" r="13" fill="#1C5C4C" opacity="0.82"/>
+  <circle cx="150" cy="320" r="13" fill="#1C5C4C" opacity="0.82"/>
+  <circle cx="362" cy="320" r="13" fill="#1C5C4C" opacity="0.82"/>
+  <!-- Dot inner rings (ornate) -->
+  <circle cx="150" cy="222" r="7" fill="none" stroke="#4DBF9C" stroke-width="1.5" opacity="0.5"/>
+  <circle cx="362" cy="222" r="7" fill="none" stroke="#4DBF9C" stroke-width="1.5" opacity="0.5"/>
+  <circle cx="150" cy="320" r="7" fill="none" stroke="#4DBF9C" stroke-width="1.5" opacity="0.5"/>
+  <circle cx="362" cy="320" r="7" fill="none" stroke="#4DBF9C" stroke-width="1.5" opacity="0.5"/>
+
+  <!-- ══════════════ LEDGER TEXT LINES (bottom of doc) ══════════════ -->
+  <!-- Line 1 (full width) -->
+  <rect x="136" y="378" width="240" height="18" rx="9" fill="#8FDCC2" opacity="0.52"/>
+  <!-- Line 2 (shorter, like last line of text) -->
+  <rect x="136" y="410" width="178" height="18" rx="9" fill="#8FDCC2" opacity="0.35"/>
+</svg>
