@@ -5,7 +5,7 @@
  */
 "use strict";
 
-var CACHE = "piutangku-v1";
+var CACHE = "piutangku-v2";
 
 /* Daftar aset inti. URL relatif agar aman di GitHub Pages (subpath repo). */
 var ASSETS = [
