@@ -61,6 +61,44 @@
   }
   const byId = (store, id) => state[store].find((x) => x.id === id);
 
+  /* ---- Urutan daftar pinjaman (per debitur) ---- */
+  const _toTime = (v) => { const n = new Date(v).getTime(); return isNaN(n) ? 0 : n; };
+  function getLoanSort(d) {
+    const s = d && d.loanSort;
+    if (s && (s.by === "amount" || s.by === "date" || s.by === "manual")) {
+      return { by: s.by, dir: s.dir === "asc" ? "asc" : "desc" };
+    }
+    return { by: "date", dir: "desc" };   // bawaan: terbaru dulu
+  }
+  function sortLoansFor(d, loans) {
+    const p = getLoanSort(d);
+    const arr = loans.slice();
+    if (p.by === "manual") {
+      arr.sort((a, b) => {
+        const ao = typeof a.order === "number", bo = typeof b.order === "number";
+        if (ao && bo) return a.order - b.order;
+        if (ao !== bo) return ao ? -1 : 1;                       // yang sudah diatur di atas
+        return _toTime(b.createdAt || b.date) - _toTime(a.createdAt || a.date);
+      });
+      return arr;
+    }
+    const dir = p.dir === "asc" ? 1 : -1;
+    if (p.by === "amount") {
+      arr.sort((a, b) => {
+        const c = ((Number(a.amount) || 0) - (Number(b.amount) || 0)) * dir;
+        if (c !== 0) return c;
+        return _toTime(b.createdAt || b.date) - _toTime(a.createdAt || a.date);  // seri: terbaru dulu
+      });
+      return arr;
+    }
+    arr.sort((a, b) => {                                          // tanggal
+      const c = (_toTime(a.date) - _toTime(b.date)) * dir;
+      if (c !== 0) return c;
+      return (_toTime(a.createdAt || a.date) - _toTime(b.createdAt || b.date)) * dir;
+    });
+    return arr;
+  }
+
   /* ilustrasi SVG ringan (on-brand, tanpa IP) */
   const ART = {
     hero: `<svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -258,8 +296,11 @@
     const s = Calc.debtorSummary(d, state.loans, state.payments);
     const ts = Calc.trustScore(d, state.loans, state.payments);
 
-    const loansHtml = s.loans.length
-      ? s.loans.map((l) => loanCard(l)).join("")
+    const sortPref = getLoanSort(d);
+    const manualMode = sortPref.by === "manual";
+    const orderedLoans = sortLoansFor(d, s.loans);
+    const loansHtml = orderedLoans.length
+      ? orderedLoans.map((l) => loanCard(l, manualMode)).join("")
       : `<div class="center muted" style="padding:18px 10px;font-size:13px">Belum ada pinjaman untuk debitur ini.</div>`;
 
     render(`
@@ -302,8 +343,14 @@
       </div>
 
       <div class="sec-head"><h2>Pinjaman</h2>
-        <button class="add-loan-link" data-act="add-loan" data-debtor="${d.id}">${icon("ic-plus")} Tambah</button></div>
-      <div class="list stagger">${loansHtml}</div>
+        <div class="sec-actions">
+          ${s.loans.length > 1 ? `<div class="sort-anchor">
+            <button class="sort-trigger${manualMode ? " on" : ""}" data-act="sort-open" data-debtor="${d.id}" aria-haspopup="true" aria-expanded="false">${icon("ic-filter", 15)}<span>Urutkan</span></button>
+          </div>` : ""}
+          <button class="add-loan-link" data-act="add-loan" data-debtor="${d.id}">${icon("ic-plus")} Tambah</button>
+        </div></div>
+      ${manualMode ? `<div class="sort-hint" id="sort-hint">${icon("ic-info", 13)} Mode atur manual aktif — seret kartu lewat gagang di kirinya untuk mengubah urutan.</div>` : ""}
+      <div class="list stagger${manualMode ? " manual-sort" : ""}" id="loan-list" data-debtor="${d.id}">${loansHtml}</div>
       <div style="height:18px"></div>
     `, { nav: false, fab: { act: "add-loan", data: `data-debtor="${d.id}"`, label: "Tambah pinjaman" } });
   }
@@ -375,11 +422,12 @@
     ];
   }
 
-  function loanCard(l) {
+  function loanCard(l, manual) {
     const ls = Calc.loanSummary(l, state.payments);
-    return `<button class="loan-card${ls.lunas ? " settled" : ""}" data-act="go" data-go="/pinjaman/${l.id}">
+    const inner = `
       <div class="loan-top">
-        <div><div class="loan-title">${escapeHtml(l.description || "Pinjaman")}</div>
+        ${manual ? `<span class="drag-handle" aria-label="Seret untuk mengatur urutan">${icon("ic-dots-h")}</span>` : ""}
+        <div class="loan-head"><div class="loan-title">${escapeHtml(l.description || "Pinjaman")}</div>
           <div class="loan-date">${tanggal(l.date)}${l.attachments && l.attachments.length ? " · " + icon("ic-image", 11) + " " + l.attachments.length : ""}</div></div>
         <div class="loan-amt tnum">${rupiah(l.amount)}</div>
       </div>
@@ -388,8 +436,97 @@
         <div class="ls" style="text-align:right"><span class="k">${ls.lunas ? "Status" : "Sisa"}</span>
           <span class="v ${ls.lunas ? "" : "due"} tnum">${ls.lunas ? "Lunas ✓" : rupiah(ls.remaining)}</span></div>
       </div>
-      <div class="mini-prog"><span style="width:${ls.percent}%"></span></div>
-    </button>`;
+      <div class="mini-prog"><span style="width:${ls.percent}%"></span></div>`;
+    if (manual) {
+      return `<div class="loan-card sortable${ls.lunas ? " settled" : ""}" data-loan-id="${l.id}">${inner}</div>`;
+    }
+    return `<button class="loan-card${ls.lunas ? " settled" : ""}" data-act="go" data-go="/pinjaman/${l.id}" data-loan-id="${l.id}">${inner}</button>`;
+  }
+
+  /* ---- Popup "Urutkan" (cascade) untuk daftar pinjaman ---- */
+  function sortPopInner(d) {
+    const p = getLoanSort(d);
+    const sortRow = (by, ic, label) => {
+      const active = p.by === by;
+      const sub = by === "amount"
+        ? (p.dir === "asc" ? "Terkecil dulu" : "Terbesar dulu")
+        : (p.dir === "asc" ? "Terlama dulu" : "Terbaru dulu");
+      const right = active
+        ? `<span class="sort-badge">${p.dir === "asc" ? "A–Z" : "Z–A"}</span>`
+        : `<span class="sort-chev">${icon("ic-chevron")}</span>`;
+      return `<button class="sort-opt${active ? " active" : ""}" data-act="sort-by" data-by="${by}" data-debtor="${d.id}">
+        <span class="sort-oic">${icon(ic)}</span>
+        <span class="sort-otext"><span class="sort-ot">${label}</span>${active ? `<span class="sort-od">${sub}</span>` : ""}</span>
+        ${right}</button>`;
+    };
+    const manualActive = p.by === "manual";
+    return `
+      ${sortRow("amount", "ic-coins", "Besar hutang")}
+      ${sortRow("date", "ic-calendar", "Tanggal masuk")}
+      <button class="sort-opt${manualActive ? " active" : ""}" data-act="sort-manual" data-debtor="${d.id}">
+        <span class="sort-oic">${icon("ic-dots-h")}</span>
+        <span class="sort-otext"><span class="sort-ot">Atur manual</span><span class="sort-od">Seret untuk mengurutkan sendiri</span></span>
+        ${manualActive ? `<span class="sort-check">${icon("ic-check")}</span>` : `<span class="sort-chev">${icon("ic-chevron")}</span>`}</button>
+      <div class="sort-note">Ketuk pilihan yang aktif sekali lagi untuk membalik urutan (A–Z ⇄ Z–A).</div>`;
+  }
+  function openSortPop(d) {
+    if (!d) return;
+    const anchor = $app.querySelector(".sort-anchor");
+    if (!anchor) return;
+    if (anchor.querySelector(".sort-pop")) { closeSortPop(); return; }   // toggle tutup
+    const pop = document.createElement("div");
+    pop.className = "sort-pop";
+    pop.setAttribute("role", "menu");
+    pop.innerHTML = sortPopInner(d);
+    anchor.appendChild(pop);
+    const trg = anchor.querySelector(".sort-trigger");
+    if (trg) trg.setAttribute("aria-expanded", "true");
+  }
+  function closeSortPop() {
+    const pop = $app.querySelector(".sort-pop");
+    if (pop) pop.remove();
+    const trg = $app.querySelector(".sort-trigger");
+    if (trg) trg.setAttribute("aria-expanded", "false");
+  }
+  function refreshLoanList(d) {
+    const list = document.getElementById("loan-list");
+    if (!list) return;
+    const s = Calc.debtorSummary(d, state.loans, state.payments);
+    const p = getLoanSort(d);
+    const manual = p.by === "manual";
+    const ordered = sortLoansFor(d, s.loans);
+    list.classList.toggle("manual-sort", manual);
+    list.innerHTML = ordered.length
+      ? ordered.map((l) => loanCard(l, manual)).join("")
+      : `<div class="center muted" style="padding:18px 10px;font-size:13px">Belum ada pinjaman untuk debitur ini.</div>`;
+    const hint = document.getElementById("sort-hint");
+    if (hint && !manual) hint.remove();
+    const trg = $app.querySelector(".sort-trigger");
+    if (trg) trg.classList.toggle("on", manual);
+  }
+  async function setLoanSortBy(d, by) {
+    if (!d) return;
+    const cur = getLoanSort(d);
+    const dir = (cur.by === by) ? (cur.dir === "asc" ? "desc" : "asc") : "asc";  // klik kedua = balik arah
+    d.loanSort = { by, dir };
+    try { await DB.put("debtors", d); } catch (_) {}
+    refreshLoanList(d);
+    const pop = $app.querySelector(".sort-pop");
+    if (pop) pop.innerHTML = sortPopInner(d);   // popup tetap terbuka, perbarui status
+  }
+  async function enableManualSort(d) {
+    if (!d) return;
+    // mulai mode manual dari urutan yang sedang tampil: beri 'order' berurutan
+    const s = Calc.debtorSummary(d, state.loans, state.payments);
+    const ordered = sortLoansFor(d, s.loans);
+    ordered.forEach((l, i) => { const ll = byId("loans", l.id); if (ll) ll.order = i; });
+    d.loanSort = { by: "manual", dir: "asc" };
+    try {
+      await DB.put("debtors", d);
+      for (const l of ordered) { const ll = byId("loans", l.id); if (ll) await DB.put("loans", ll); }
+    } catch (_) {}
+    closeSortPop();
+    rerender();   // render ulang profil agar muncul gagang seret + petunjuk
   }
 
   /* ---------------------------------------------------------
@@ -902,6 +1039,7 @@
       color: existing ? (existing.color || "") : "",
       note: (document.getElementById("f-note").value || "").trim(),
       createdAt: existing ? existing.createdAt : Calc.todayISO(),
+      loanSort: existing ? existing.loanSort : undefined,
     };
     await DB.put("debtors", obj);
     debtorPhoto = null;
@@ -1145,6 +1283,9 @@
       if (trg) trg.setAttribute("aria-expanded", "false");
     }
 
+    // tutup popup "Urutkan" bila klik di luar areanya (klik pertama cukup menutup)
+    if ($app.querySelector(".sort-pop") && !e.target.closest(".sort-anchor")) { closeSortPop(); return; }
+
     const el = e.target.closest("[data-act]");
     if (!el) return;
     const act = el.dataset.act;
@@ -1166,6 +1307,10 @@
       case "about": openAbout(); break;
 
       case "filter": debtorFilter = el.dataset.val; renderDebtors(); break;
+
+      case "sort-open": openSortPop(byId("debtors", debtorId)); break;
+      case "sort-by": await setLoanSortBy(byId("debtors", debtorId), el.dataset.by); break;
+      case "sort-manual": await enableManualSort(byId("debtors", debtorId)); break;
 
       case "pick-noop": break;
       case "quick-amt": {
@@ -1259,6 +1404,53 @@
         installDismissed = true; { const b = $app.querySelector(".install-banner"); if (b) b.remove(); }
         break;
     }
+  });
+
+  /* ---------------------------------------------------------
+     Seret manual daftar pinjaman (pointer/touch)
+     --------------------------------------------------------- */
+  let dragLoan = null;
+  function onLoanDragMove(e) {
+    if (!dragLoan) return;
+    e.preventDefault();
+    const list = dragLoan.list;
+    const y = e.clientY;
+    const others = Array.from(list.querySelectorAll(".loan-card:not(.dragging)"));
+    let ref = null;
+    for (const c of others) {
+      const r = c.getBoundingClientRect();
+      if (y < r.top + r.height / 2) { ref = c; break; }
+    }
+    if (ref) { if (dragLoan.el.nextElementSibling !== ref) list.insertBefore(dragLoan.el, ref); }
+    else if (list.lastElementChild !== dragLoan.el) { list.appendChild(dragLoan.el); }
+  }
+  async function onLoanDragEnd() {
+    document.removeEventListener("pointermove", onLoanDragMove);
+    document.removeEventListener("pointerup", onLoanDragEnd);
+    document.removeEventListener("pointercancel", onLoanDragEnd);
+    const d = dragLoan;
+    dragLoan = null;
+    if (!d) return;
+    d.el.classList.remove("dragging");
+    document.body.classList.remove("dragging-active");
+    const ids = Array.from(d.list.querySelectorAll(".loan-card")).map((c) => c.dataset.loanId);
+    ids.forEach((lid, i) => { const l = byId("loans", lid); if (l) l.order = i; });
+    try { for (const lid of ids) { const l = byId("loans", lid); if (l) await DB.put("loans", l); } }
+    catch (_) {}
+  }
+  $app.addEventListener("pointerdown", (e) => {
+    const handle = e.target.closest(".drag-handle");
+    if (!handle) return;
+    const el = handle.closest(".loan-card");
+    const list = el && el.closest("#loan-list");
+    if (!el || !list) return;
+    e.preventDefault();
+    dragLoan = { el, list };
+    el.classList.add("dragging");
+    document.body.classList.add("dragging-active");
+    document.addEventListener("pointermove", onLoanDragMove, { passive: false });
+    document.addEventListener("pointerup", onLoanDragEnd);
+    document.addEventListener("pointercancel", onLoanDragEnd);
   });
 
   // input: format rupiah & pencarian
