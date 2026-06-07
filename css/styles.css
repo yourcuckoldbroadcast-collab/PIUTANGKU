@@ -430,7 +430,7 @@ img{max-width:100%;display:block;}
 .sheet-grip{width:40px;height:5px;border-radius:9px;background:var(--line-strong);margin:10px auto 4px;flex:none;}
 .sheet-head{display:flex;align-items:center;justify-content:space-between;padding:6px 20px 8px;}
 .sheet-head h3{font-size:18px;font-weight:800;color:var(--ink);letter-spacing:-.3px;}
-.sheet-body{padding:4px 20px 20px;overflow-y:auto;}
+.sheet-body{padding:4px 20px 20px;overflow-y:auto;overflow-x:hidden;}
 .sheet-body::-webkit-scrollbar{width:0;}
 
 /* dialog (center) */
@@ -753,6 +753,4 @@ body.dragging-active{user-select:none;-webkit-user-select:none;cursor:grabbing;}
 .pa-note svg{width:13px;height:13px;flex:none;margin-top:1px;}
 .pa-note.ok{color:var(--pos);}
 .pa-note.warn{color:var(--orange-700);}
-.pay-actions{display:flex;gap:10px;}
-.pay-actions .btn-ghost{flex:none;}
-.pay-actions .btn-primary{flex:1;}
+.pay-actions{display:flex;flex-direction:column;gap:10px;}
