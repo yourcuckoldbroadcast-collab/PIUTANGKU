@@ -4,6 +4,7 @@
 
 const Calc = (() => {
   const DAY = 86400000;
+  const toTime = (v) => { const n = new Date(v).getTime(); return isNaN(n) ? 0 : n; };
 
   // ---------- ID unik ----------
   function uid() {
@@ -105,7 +106,13 @@ const Calc = (() => {
       lunas: totalBorrowed > 0 && remaining <= 0,
       hasDebt: remaining > 0,
       lastActivity,
-      loans: dl.slice().sort((a, b) => new Date(b.date) - new Date(a.date)),
+      // tanggal terbaru dulu; bila tanggalnya sama, yang paling baru DIINPUT
+      // tampil lebih dulu. createdAt presisi dipakai sebagai pemecah seri,
+      // karena urutan dari IndexedDB (getAll) mengikuti id acak, bukan waktu input.
+      loans: dl.slice().sort((a, b) =>
+        (toTime(b.date) - toTime(a.date)) ||
+        (toTime(b.createdAt || b.date) - toTime(a.createdAt || a.date))
+      ),
     };
   }
 

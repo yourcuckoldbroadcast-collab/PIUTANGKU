@@ -920,7 +920,9 @@
       id: Calc.uid(), debtorId, amount, date,
       description: desc || "Pinjaman",
       attachments: sheetAttachments.slice(),
-      createdAt: Calc.todayISO(),
+      // full timestamp (not just the date) so loans added on the same day
+      // keep their input order when sorted
+      createdAt: new Date().toISOString(),
     };
     await DB.put("loans", obj);
     sheetAttachments = [];
