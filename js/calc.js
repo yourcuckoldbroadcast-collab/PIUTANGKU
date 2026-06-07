@@ -116,6 +116,36 @@ const Calc = (() => {
     };
   }
 
+  // ---------- SmartPay: alokasi pembayaran otomatis ----------
+  // Strategi "Debt Cleanup": lunasi sisa hutang TERKECIL dulu sampai dana habis,
+  // supaya jumlah item hutang aktif berkurang secepat mungkin.
+  // items: [{id, remaining, createdAt?, date?}], amount: number
+  // return: { alloc: {id: nominal}, allocated, leftover, cleared }
+  function smartAllocate(amount, items) {
+    let left = Math.max(0, Math.floor(Number(amount) || 0));
+    const start = left;
+    const order = (items || [])
+      .filter((it) => (Number(it.remaining) || 0) > 0)
+      .slice()
+      .sort((a, b) =>
+        ((Number(a.remaining) || 0) - (Number(b.remaining) || 0)) ||
+        (toTime(a.createdAt || a.date) - toTime(b.createdAt || b.date))
+      );
+    const alloc = {};
+    let cleared = 0;
+    for (const it of order) {
+      if (left <= 0) break;
+      const rem = Number(it.remaining) || 0;
+      const pay = Math.min(rem, left);
+      if (pay > 0) {
+        alloc[it.id] = pay;
+        left -= pay;
+        if (pay >= rem) cleared++;
+      }
+    }
+    return { alloc, allocated: start - left, leftover: left, cleared };
+  }
+
   // ---------- Ringkasan global (dashboard) ----------
   function globalSummary(debtors, loans, payments) {
     const totalBorrowed = loans.reduce((s, l) => s + (Number(l.amount) || 0), 0);
@@ -289,7 +319,7 @@ const Calc = (() => {
   return {
     uid, rupiah, rupiahShort, parseRupiah, tanggal, todayISO, waktuRelatif, pct,
     avatarColor, initials,
-    loanSummary, debtorSummary, globalSummary,
+    loanSummary, debtorSummary, globalSummary, smartAllocate,
     trustScore, reminders, validateImport, sampleData,
   };
 })();

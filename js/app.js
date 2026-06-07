@@ -19,6 +19,7 @@
   let debtorPhoto = null;         // foto sementara saat menambah/ubah debitur (dataURL)
   let deferredPrompt = null;      // event beforeinstallprompt
   let installDismissed = false;
+  let paySheet = null;            // komposer pembayaran SmartPay: {debtorId, mode, amount, alloc}
 
   /* ---------------------------------------------------------
      Util kecil
@@ -328,7 +329,9 @@
       ${trustHtml(d, ts)}
 
       <div class="summary">
-        <h3>Ringkasan</h3>
+        <div class="sum-head"><h3>Ringkasan</h3>
+          ${s.remaining > 0 ? `<button class="pay-btn" data-act="pay-open" data-debtor="${d.id}">${icon("ic-wallet", 15)} Bayar</button>` : ""}
+        </div>
         <div class="sum-grid">
           <div class="sum-cells">
             <div class="sum-cell"><div class="scl">Total Dipinjam</div><div class="scv tnum">${rupiahShort(s.totalBorrowed)}</div></div>
@@ -776,6 +779,7 @@
      SHEET & DIALOG
      --------------------------------------------------------- */
   function closeScrim() {
+    paySheet = null;
     $app.querySelectorAll(".scrim").forEach((sc) => {
       sc.classList.remove("show");
       setTimeout(() => sc.remove(), 300);
@@ -985,6 +989,142 @@
     const loan = byId("loans", loanId);
     if (!loan) return;
     openSheet("Catat Pembayaran", paymentFormBody(loan));
+  }
+
+  /* ---------------------------------------------------------
+     SmartPay — bayar beberapa hutang sekaligus (auto-alokasi)
+     --------------------------------------------------------- */
+  function payActiveLoans(d) {
+    // hutang aktif (sisa>0), info ringkas, urut sisa terkecil dulu
+    return state.loans
+      .filter((l) => l.debtorId === d.id)
+      .map((l) => {
+        const ls = Calc.loanSummary(l, state.payments);
+        return { id: l.id, description: l.description || "Pinjaman", remaining: ls.remaining, createdAt: l.createdAt, date: l.date };
+      })
+      .filter((x) => x.remaining > 0)
+      .sort((a, b) => (a.remaining - b.remaining) || (_toTime(a.createdAt || a.date) - _toTime(b.createdAt || b.date)));
+  }
+  function payFootManual(d) {
+    const amount = paySheet ? paySheet.amount : 0;
+    const sum = Object.values(paySheet ? paySheet.alloc : {}).reduce((s, v) => s + (Number(v) || 0), 0);
+    const over = amount > 0 && sum > amount;
+    return `<span>Total dialokasikan</span><span class="tnum${over ? " over" : ""}">${rupiah(sum)}${amount > 0 ? ` / ${rupiah(amount)}` : ""}</span>`;
+  }
+  function payAllocInner(d) {
+    const items = payActiveLoans(d);
+    const amount = paySheet ? paySheet.amount : 0;
+    if (paySheet && paySheet.mode === "manual") {
+      const rows = items.map((it) => {
+        const val = paySheet.alloc[it.id];
+        const vStr = (typeof val === "number" && val > 0) ? Number(val).toLocaleString("id-ID") : "";
+        return `<div class="pa-row manual">
+          <div class="pa-info"><div class="pa-name">${escapeHtml(it.description)}</div>
+            <div class="pa-sub">Sisa ${rupiah(it.remaining)}</div></div>
+          <label class="pa-in"><span class="pre">Rp</span>
+            <input class="pa-amt" data-input="rupiah" inputmode="numeric" data-loan="${it.id}" data-max="${it.remaining}" placeholder="0" value="${vStr}"></label>
+        </div>`;
+      }).join("");
+      return `<div class="pa-list">${rows}</div>
+        <div class="pa-foot" id="pa-foot">${payFootManual(d)}</div>
+        <button class="btn btn-primary" data-act="pay-commit" data-debtor="${d.id}">${icon("ic-check")} Simpan pembayaran</button>`;
+    }
+    // SmartPay (Debt Cleanup)
+    const { alloc, allocated, leftover, cleared } = Calc.smartAllocate(amount, items);
+    const rows = items.map((it) => {
+      const pay = alloc[it.id] || 0;
+      const full = pay > 0 && pay >= it.remaining;
+      const status = full
+        ? `<span class="pa-status lunas">${icon("ic-check-circle", 14)} Lunas</span>`
+        : pay > 0
+          ? `<span class="pa-status part">Bayar ${rupiah(pay)}</span>`
+          : `<span class="pa-status none">—</span>`;
+      return `<div class="pa-row${pay > 0 ? " hit" : ""}">
+        <div class="pa-info"><div class="pa-name">${escapeHtml(it.description)}</div>
+          <div class="pa-sub">Sisa ${rupiah(it.remaining)}${pay > 0 && !full ? ` → ${rupiah(it.remaining - pay)}` : ""}</div></div>
+        ${status}
+      </div>`;
+    }).join("");
+    const note = amount <= 0
+      ? `<div class="pa-note">${icon("ic-info", 13)} Masukkan nominal untuk melihat rekomendasi alokasi.</div>`
+      : leftover > 0
+        ? `<div class="pa-note warn">${icon("ic-info", 13)} Semua hutang sudah lunas. Sisa dana ${rupiah(leftover)} belum teralokasi.</div>`
+        : `<div class="pa-note ok">${icon("ic-check-circle", 13)} ${cleared} hutang lunas • dialokasikan ${rupiah(allocated)}.</div>`;
+    return `<div class="pa-list">${rows}</div>
+      ${note}
+      <div class="pay-actions">
+        <button class="btn btn-ghost" data-act="pay-edit-manual" data-debtor="${d.id}">Edit manual</button>
+        <button class="btn btn-primary" data-act="pay-commit" data-debtor="${d.id}"${amount <= 0 ? " disabled" : ""}>${icon("ic-check")} Konfirmasi</button>
+      </div>`;
+  }
+  function payBody(d) {
+    const s = Calc.debtorSummary(d, state.loans, state.payments);
+    const n = payActiveLoans(d).length;
+    return `
+      <div class="pay-ctx">
+        <div><div class="pk">${escapeHtml(d.name)}</div>
+          <div class="pt tnum">${n} hutang aktif</div></div>
+        <div class="pr"><div class="k">Total sisa</div><div class="v tnum">${rupiah(s.remaining)}</div></div>
+      </div>
+      <div class="field"><label>Nominal pembayaran</label>
+        <div class="input-icon"><span class="pre">Rp</span>
+          <input class="input amount-input" id="f-pay-total" inputmode="numeric" data-input="rupiah" placeholder="0"></div></div>
+      <div class="quick-amts">
+        <button class="quick-amt" data-act="pay-quick" data-val="${s.remaining}" style="background:var(--pos-bg);color:var(--pos);border-color:transparent">Bayar semua ${rupiahShort(s.remaining)}</button>
+      </div>
+      <div class="field"><label>Tanggal bayar</label>
+        <input class="input" id="f-pay-total-date" type="date" value="${Calc.todayISO()}"></div>
+      <div class="pay-modes" role="tablist">
+        <button class="pay-mode${paySheet && paySheet.mode === "smart" ? " active" : ""}" data-act="pay-mode" data-mode="smart" data-debtor="${d.id}">${icon("ic-flame", 15)} SmartPay <span class="pm-tag">rekomendasi</span></button>
+        <button class="pay-mode${paySheet && paySheet.mode === "manual" ? " active" : ""}" data-act="pay-mode" data-mode="manual" data-debtor="${d.id}">${icon("ic-edit", 15)} Manual</button>
+      </div>
+      <div id="pay-alloc" data-debtor="${d.id}">${payAllocInner(d)}</div>`;
+  }
+  function refreshPayAlloc(d) {
+    const box = document.getElementById("pay-alloc");
+    if (box) box.innerHTML = payAllocInner(d);
+  }
+  function openPaySheet(debtorId) {
+    const d = byId("debtors", debtorId);
+    if (!d) return;
+    if (!payActiveLoans(d).length) { toast("Tidak ada hutang aktif untuk dibayar", "err"); return; }
+    paySheet = { debtorId, mode: "smart", amount: 0, alloc: {} };
+    openSheet("Bayar Hutang", payBody(d));
+  }
+  async function commitPay(d) {
+    if (!d || !paySheet) return;
+    const active = payActiveLoans(d);
+    const remById = {}; active.forEach((it) => { remById[it.id] = it.remaining; });
+    const date = (document.getElementById("f-pay-total-date") && document.getElementById("f-pay-total-date").value) || Calc.todayISO();
+    let alloc;
+    if (paySheet.mode === "manual") {
+      alloc = {};
+      let sum = 0;
+      for (const [lid, v] of Object.entries(paySheet.alloc)) {
+        const pay = Math.min(Number(v) || 0, remById[lid] || 0);
+        if (pay > 0) { alloc[lid] = pay; sum += pay; }
+      }
+      if (sum <= 0) { toast("Belum ada nominal yang dialokasikan", "err"); return; }
+      if (paySheet.amount > 0 && sum > paySheet.amount) { toast("Total alokasi melebihi nominal pembayaran", "err"); return; }
+    } else {
+      if (!paySheet.amount || paySheet.amount <= 0) { toast("Masukkan nominal pembayaran dulu", "err"); return; }
+      alloc = Calc.smartAllocate(paySheet.amount, active).alloc;
+      if (!Object.keys(alloc).length) { toast("Tidak ada yang bisa dialokasikan", "err"); return; }
+    }
+    const note = paySheet.mode === "smart" ? "SmartPay" : "";
+    const entries = Object.entries(alloc);
+    let cleared = 0;
+    for (const [lid, pay] of entries) {
+      if (pay >= (remById[lid] || 0)) cleared++;
+      await DB.put("payments", {
+        id: Calc.uid(), loanId: lid, debtorId: d.id, amount: pay,
+        date, note, createdAt: new Date().toISOString(),
+      });
+    }
+    paySheet = null;
+    await refresh();
+    rerender();
+    toast(cleared > 0 ? `${cleared} hutang lunas 🎉` : `Pembayaran tercatat di ${entries.length} hutang`, "ok");
   }
 
   function openQuickAdd() {
@@ -1306,6 +1446,42 @@
       case "add-payment": openAddPayment(loanId); break;
       case "about": openAbout(); break;
 
+      case "pay-open": openPaySheet(debtorId); break;
+      case "pay-quick": {
+        const inp = document.getElementById("f-pay-total");
+        const v = Number(el.dataset.val) || 0;
+        if (inp) inp.value = v ? v.toLocaleString("id-ID") : "";
+        if (paySheet) {
+          paySheet.amount = v;
+          const d = byId("debtors", paySheet.debtorId);
+          if (paySheet.mode === "smart") refreshPayAlloc(d);
+          else { const f = document.getElementById("pa-foot"); if (f) f.innerHTML = payFootManual(d); }
+        }
+        break;
+      }
+      case "pay-mode": {
+        if (!paySheet) break;
+        const mode = el.dataset.mode;
+        if (mode !== paySheet.mode) {
+          const d = byId("debtors", paySheet.debtorId);
+          if (mode === "manual") paySheet.alloc = Object.assign({}, Calc.smartAllocate(paySheet.amount, payActiveLoans(d)).alloc);
+          paySheet.mode = mode;
+          $app.querySelectorAll(".pay-mode").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+          refreshPayAlloc(d);
+        }
+        break;
+      }
+      case "pay-edit-manual": {
+        if (!paySheet) break;
+        const d = byId("debtors", paySheet.debtorId);
+        paySheet.alloc = Object.assign({}, Calc.smartAllocate(paySheet.amount, payActiveLoans(d)).alloc);
+        paySheet.mode = "manual";
+        $app.querySelectorAll(".pay-mode").forEach((b) => b.classList.toggle("active", b.dataset.mode === "manual"));
+        refreshPayAlloc(d);
+        break;
+      }
+      case "pay-commit": await commitPay(byId("debtors", debtorId)); break;
+
       case "filter": debtorFilter = el.dataset.val; renderDebtors(); break;
 
       case "sort-open": openSortPop(byId("debtors", debtorId)); break;
@@ -1463,6 +1639,21 @@
     } else if (t.dataset.input === "search") {
       debtorQuery = t.value;
       refreshDebtorList();
+      return;
+    }
+    // SmartPay: nominal total → hitung ulang alokasi; input manual per hutang → perbarui total
+    if (paySheet && t.id === "f-pay-total") {
+      paySheet.amount = Calc.parseRupiah(t.value);
+      const d = byId("debtors", paySheet.debtorId);
+      if (paySheet.mode === "smart") refreshPayAlloc(d);
+      else { const f = document.getElementById("pa-foot"); if (f) f.innerHTML = payFootManual(d); }
+    } else if (paySheet && t.classList.contains("pa-amt")) {
+      let v = Calc.parseRupiah(t.value);
+      const max = Number(t.dataset.max) || 0;
+      if (v > max) { v = max; t.value = v ? v.toLocaleString("id-ID") : ""; }   // tak boleh lebihi sisa hutang
+      const lid = t.dataset.loan;
+      if (v > 0) paySheet.alloc[lid] = v; else delete paySheet.alloc[lid];
+      const f = document.getElementById("pa-foot"); if (f) f.innerHTML = payFootManual(byId("debtors", paySheet.debtorId));
     }
   });
 
