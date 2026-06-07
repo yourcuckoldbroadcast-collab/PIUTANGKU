@@ -632,8 +632,14 @@ img{max-width:100%;display:block;}
 @keyframes fadeUp{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);}}
 @keyframes fadeIn{from{opacity:0;}to{opacity:1;}}
 @keyframes popIn{0%{opacity:0;transform:scale(.96);}100%{opacity:1;transform:scale(1);}}
-.screen>*{animation:fadeUp .4s var(--ease) both;}
-.stagger>*{animation:fadeUp .42s var(--ease) both;}
+/* fill-mode "backwards" (hold the start state during the stagger delay) — NOT
+   "forwards"/"both". A forward-filling transform/opacity animation stays "in
+   effect" after it ends, so the element keeps a stacking context forever. That
+   turned .sec-head and .list into sibling stacking contexts; since .list comes
+   later in the DOM it painted over the "Urutkan" popover no matter its z-index.
+   With "backwards" the context disappears once the entrance animation finishes. */
+.screen>*{animation:fadeUp .4s var(--ease) backwards;}
+.stagger>*{animation:fadeUp .42s var(--ease) backwards;}
 .stagger>*:nth-child(1){animation-delay:.02s;} .stagger>*:nth-child(2){animation-delay:.06s;}
 .stagger>*:nth-child(3){animation-delay:.10s;} .stagger>*:nth-child(4){animation-delay:.14s;}
 .stagger>*:nth-child(5){animation-delay:.18s;} .stagger>*:nth-child(6){animation-delay:.22s;}
