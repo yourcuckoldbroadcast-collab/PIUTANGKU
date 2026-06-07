@@ -654,3 +654,52 @@ img{max-width:100%;display:block;}
 .install-banner .ib-btn{background:var(--mint-400);color:#fff;font-weight:700;font-size:13px;padding:8px 14px;border-radius:var(--pill);}
 .install-banner .ib-x{color:rgba(255,255,255,.6);padding:4px;}
 .install-banner .ib-x svg{width:16px;height:16px;}
+
+/* ------------------- Urutkan pinjaman + seret manual -------------------- */
+.sec-actions{display:flex;align-items:center;gap:8px;}
+.loan-head{flex:1;min-width:0;}
+
+.sort-anchor{position:relative;}
+.sort-trigger{display:inline-flex;align-items:center;gap:5px;font-size:13px;font-weight:700;color:var(--muted);
+  background:var(--line);padding:7px 12px;border-radius:var(--pill);transition:background .15s,color .15s,transform .12s;}
+.sort-trigger svg{width:15px;height:15px;}
+.sort-trigger:active{transform:scale(.97);}
+.sort-trigger.on,.sort-trigger[aria-expanded="true"]{background:var(--mint-100);color:var(--mint-700);}
+
+.sort-pop{position:absolute;top:calc(100% + 8px);right:0;z-index:46;width:250px;max-width:78vw;
+  background:#fff;border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--sh-lg);
+  padding:6px;transform-origin:top right;animation:sortpop .16s var(--ease);}
+@keyframes sortpop{from{opacity:0;transform:translateY(-6px) scale(.98)}to{opacity:1;transform:none}}
+.sort-opt{display:flex;align-items:center;gap:11px;width:100%;text-align:left;padding:10px;border-radius:var(--r-xs);
+  transition:background .14s,transform .12s;}
+.sort-opt:hover{background:var(--mint-50);}
+.sort-opt:active{transform:scale(.99);}
+.sort-opt.active{background:var(--mint-50);}
+.sort-oic{width:34px;height:34px;border-radius:11px;flex:none;display:grid;place-items:center;
+  background:var(--bg-warm);color:var(--muted);}
+.sort-opt.active .sort-oic{background:var(--mint-100);color:var(--mint-700);}
+.sort-oic svg{width:18px;height:18px;}
+.sort-otext{flex:1;min-width:0;}
+.sort-ot{display:block;font-size:13.5px;font-weight:700;color:var(--ink);}
+.sort-od{display:block;font-size:11px;color:var(--muted);margin-top:1px;}
+.sort-badge{flex:none;font-size:11px;font-weight:800;color:var(--mint-700);background:var(--mint-100);
+  padding:3px 8px;border-radius:var(--pill);letter-spacing:.3px;}
+.sort-chev{color:var(--faint);flex:none;display:grid;place-items:center;}
+.sort-chev svg{width:16px;height:16px;}
+.sort-check{color:var(--mint-600);flex:none;display:grid;place-items:center;}
+.sort-check svg{width:18px;height:18px;}
+.sort-note{font-size:10.5px;color:var(--faint);line-height:1.45;padding:8px 8px 3px;
+  border-top:1px solid var(--line);margin-top:4px;}
+
+.sort-hint{display:flex;align-items:center;gap:7px;margin:0 18px 10px;padding:9px 12px;
+  background:var(--mint-50);color:var(--mint-700);border-radius:var(--r-sm);font-size:12px;font-weight:600;line-height:1.35;}
+.sort-hint svg{width:14px;height:14px;flex:none;}
+
+.drag-handle{flex:none;align-self:flex-start;margin:-2px 4px 0 -4px;padding:4px;color:var(--faint);
+  touch-action:none;cursor:grab;border-radius:8px;}
+.drag-handle svg{width:20px;height:20px;display:block;transform:rotate(90deg);}
+.drag-handle:active{cursor:grabbing;color:var(--muted);}
+.list.manual-sort .loan-card{cursor:default;}
+.loan-card.sortable{display:block;}
+.loan-card.dragging{box-shadow:var(--sh-lg);transform:scale(1.015);opacity:.97;position:relative;z-index:5;}
+body.dragging-active{user-select:none;-webkit-user-select:none;cursor:grabbing;}
