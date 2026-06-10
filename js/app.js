@@ -354,6 +354,7 @@
         </div></div>
       ${manualMode ? `<div class="sort-hint" id="sort-hint">${icon("ic-info", 13)} Mode atur manual aktif — seret kartu lewat gagang di kirinya untuk mengubah urutan.</div>` : ""}
       <div class="list stagger${manualMode ? " manual-sort" : ""}" id="loan-list" data-debtor="${d.id}">${loansHtml}</div>
+      ${s.loans.length ? `<button class="del-loans-btn" data-act="del-loans-open" data-debtor="${d.id}">${icon("ic-trash", 15)} Hapus Item Hutang</button>` : ""}
       <div style="height:18px"></div>
     `, { nav: false, fab: { act: "add-loan", data: `data-debtor="${d.id}"`, label: "Tambah pinjaman" } });
   }
@@ -807,16 +808,18 @@
       <div class="sheet-body">${body}</div></div>`;
     return mountScrim(wrap);
   }
-  function openDialog({ icon: dic, tone, title, msg, confirmLabel, confirmClass, act, data }) {
+  function openDialog({ icon: dic, tone, title, msg, confirmLabel, confirmClass, cancelLabel, act, data, stack }) {
     const wrap = document.createElement("div");
     wrap.className = "scrim center";
+    const cancelBtn = `<button class="btn btn-ghost" data-act="close-sheet">${escapeHtml(cancelLabel || "Batal")}</button>`;
+    const confirmBtn = `<button class="btn ${confirmClass || "btn-danger"}" data-act="${act}" ${data || ""}>${escapeHtml(confirmLabel || "Hapus")}</button>`;
+    const actions = stack
+      ? `<div class="dialog-actions stack">${confirmBtn}${cancelBtn}</div>`   // tumpuk: konfirmasi di atas, batal di bawah
+      : `<div class="dialog-actions">${cancelBtn}${confirmBtn}</div>`;
     wrap.innerHTML = `<div class="dialog" role="alertdialog" aria-modal="true">
       <div class="dic ${tone || "ic-orange"}">${icon(dic || "ic-alert")}</div>
       <h3>${escapeHtml(title)}</h3><p>${escapeHtml(msg)}</p>
-      <div class="dialog-actions">
-        <button class="btn btn-ghost" data-act="close-sheet">Batal</button>
-        <button class="btn ${confirmClass || "btn-danger"}" data-act="${act}" ${data || ""}>${escapeHtml(confirmLabel || "Hapus")}</button>
-      </div></div>`;
+      ${actions}</div>`;
     return mountScrim(wrap);
   }
 
@@ -1245,6 +1248,58 @@
     rerender();
     toast("Pembayaran dihapus", "ok");
   }
+
+  // --- Hapus banyak item hutang sekaligus (lunas saja / semua) ---
+  function delLoansTargets(d, mode) {
+    const loans = state.loans.filter((l) => l.debtorId === d.id);
+    return mode === "paid"
+      ? loans.filter((l) => Calc.loanSummary(l, state.payments).lunas)
+      : loans;
+  }
+  function openDelLoansMenu(d) {
+    if (!d) return;
+    const all = state.loans.filter((l) => l.debtorId === d.id);
+    if (!all.length) return;
+    const paid = delLoansTargets(d, "paid").length;
+    const paidRow = paid > 0
+      ? `<button class="menu-item" style="border-radius:14px;border-bottom:none;margin-bottom:10px" data-act="del-loans-ask" data-debtor="${d.id}" data-mode="paid">
+          <div class="menu-ic ic-mint">${icon("ic-check-circle")}</div>
+          <div class="menu-txt"><div class="mt">Hapus item hutang yang lunas</div><div class="md">${paid} hutang sudah lunas akan dihapus</div></div>
+          <span class="chev">${icon("ic-chevron")}</span></button>`
+      : `<div class="menu-item disabled" style="border-radius:14px;border-bottom:none;margin-bottom:10px">
+          <div class="menu-ic ic-mint">${icon("ic-check-circle")}</div>
+          <div class="menu-txt"><div class="mt">Hapus item hutang yang lunas</div><div class="md">Belum ada hutang yang lunas</div></div></div>`;
+    openSheet("Hapus Item Hutang", `
+      ${paidRow}
+      <button class="menu-item danger" style="border-radius:14px;border-bottom:none;background:var(--due-bg)" data-act="del-loans-ask" data-debtor="${d.id}" data-mode="all">
+        <div class="menu-ic ic-orange">${icon("ic-trash")}</div>
+        <div class="menu-txt"><div class="mt">Hapus semua item hutang</div><div class="md">${all.length} hutang beserta riwayat pembayarannya</div></div>
+        <span class="chev">${icon("ic-chevron")}</span></button>`);
+  }
+  function askDelLoans(d, mode) {
+    if (!d) return;
+    const n = delLoansTargets(d, mode).length;
+    if (!n) { toast("Tidak ada hutang yang bisa dihapus", "err"); return; }
+    openDialog({
+      icon: "ic-trash",
+      title: mode === "paid" ? "Hapus hutang yang lunas?" : "Hapus semua hutang?",
+      msg: "Anda akan menghapus secara permanen catatan item hutang, anda yakin?",
+      confirmLabel: "Ya, saya yakin",
+      cancelLabel: "Tidak, saya akan mengecek ulang",
+      act: "del-loans-do",
+      data: `data-debtor="${d.id}" data-mode="${mode}"`,
+      stack: true,
+    });
+  }
+  async function delLoansBy(d, mode) {
+    if (!d) return;
+    const targets = delLoansTargets(d, mode);
+    if (!targets.length) { toast("Tidak ada hutang yang dihapus", "err"); return; }
+    for (const l of targets) { await DB.deleteLoanCascade(l.id); }
+    await refresh();
+    rerender();
+    toast(`${targets.length} item hutang dihapus`, "ok");
+  }
   async function delAttachment(loanId, idx) {
     const loan = byId("loans", loanId);
     if (!loan || !loan.attachments) return;
@@ -1549,6 +1604,10 @@
         openDialog({ icon: "ic-trash", title: "Hapus pinjaman?", msg: "Pinjaman ini beserta riwayat pembayarannya akan dihapus permanen.", confirmLabel: "Hapus", act: "confirm-del-loan", data: `data-id="${id}"` });
         break;
       case "confirm-del-loan": await delLoan(id); break;
+
+      case "del-loans-open": openDelLoansMenu(byId("debtors", debtorId)); break;
+      case "del-loans-ask": askDelLoans(byId("debtors", debtorId), el.dataset.mode); break;
+      case "del-loans-do": await delLoansBy(byId("debtors", debtorId), el.dataset.mode); break;
 
       case "del-payment":
         openDialog({ icon: "ic-trash", title: "Hapus pembayaran?", msg: "Catatan pembayaran ini akan dihapus.", confirmLabel: "Hapus", act: "confirm-del-payment", data: `data-id="${id}" data-loan="${loanId}"` });
