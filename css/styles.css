@@ -754,3 +754,14 @@ body.dragging-active{user-select:none;-webkit-user-select:none;cursor:grabbing;}
 .pa-note.ok{color:var(--pos);}
 .pa-note.warn{color:var(--orange-700);}
 .pay-actions{display:flex;flex-direction:column;gap:10px;}
+
+/* --------------------- Hapus item hutang (massal) ---------------------- */
+.del-loans-btn{display:flex;align-items:center;justify-content:center;gap:7px;margin:14px 18px 0;padding:12px;
+  border-radius:14px;font-size:13.5px;font-weight:700;color:var(--orange-700);background:var(--due-bg);
+  transition:transform .12s,filter .2s;}
+.del-loans-btn svg{width:15px;height:15px;}
+.del-loans-btn:hover{filter:brightness(.98);}
+.del-loans-btn:active{transform:scale(.985);}
+.dialog-actions.stack{flex-direction:column;}
+.menu-item.danger .mt{color:var(--orange-700);}
+.menu-item.disabled{opacity:.55;cursor:default;}
