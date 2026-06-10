@@ -1,11 +1,18 @@
 /* PiutangKu — Service Worker
  * Offline-first. Semua data tersimpan di IndexedDB (tanpa jaringan).
- * Service worker ini hanya meng-cache "app shell" (HTML, CSS, JS, font, ikon)
+ * Service worker ini meng-cache "app shell" (HTML, CSS, JS, font, ikon)
  * agar aplikasi tetap bisa dibuka tanpa koneksi internet.
+ *
+ * Strategi:
+ * - Kode aplikasi (HTML/CSS/JS/manifest) -> NETWORK-FIRST: selalu ambil versi
+ *   terbaru saat online (sehingga update langsung terlihat), fallback ke cache
+ *   saat offline. Ini memperbaiki masalah "sudah upload tapi tampilan tidak berubah".
+ * - Aset statis (font, ikon, gambar) -> CACHE-FIRST: cepat, jarang berubah.
  */
 "use strict";
 
-var CACHE = "piutangku-v2";
+/* Naikkan versi ini setiap kali ingin memaksa cache lama dibuang. */
+var CACHE = "piutangku-v3";
 
 /* Daftar aset inti. URL relatif agar aman di GitHub Pages (subpath repo). */
 var ASSETS = [
@@ -31,11 +38,10 @@ var ASSETS = [
   "./icons/favicon-16.png"
 ];
 
-/* Install: simpan app shell ke cache lalu langsung aktif. */
+/* Install: simpan app shell ke cache (selalu ambil fresh) lalu langsung aktif. */
 self.addEventListener("install", function (event) {
   event.waitUntil(
     caches.open(CACHE).then(function (cache) {
-      /* Tambahkan satu per satu agar satu aset gagal tidak menggagalkan semua. */
       return Promise.all(
         ASSETS.map(function (url) {
           return cache.add(new Request(url, { cache: "reload" })).catch(function () {
@@ -66,29 +72,35 @@ self.addEventListener("activate", function (event) {
   );
 });
 
-/* Fetch:
- * - Permintaan navigasi (buka halaman) -> fallback ke index.html saat offline (mendukung SPA hash-router).
- * - Aset lain -> cache-first, lalu jaringan (sekaligus mengisi cache runtime).
- */
+/* Simpan salinan respons yang valid ke cache. */
+function putInCache(req, res) {
+  if (res && res.status === 200 && (res.type === "basic" || res.type === "default")) {
+    var copy = res.clone();
+    caches.open(CACHE).then(function (cache) {
+      cache.put(req, copy);
+    });
+  }
+  return res;
+}
+
 self.addEventListener("fetch", function (event) {
   var req = event.request;
 
-  /* Hanya tangani GET. Biarkan metode lain lewat apa adanya. */
+  /* Hanya tangani GET same-origin. */
   if (req.method !== "GET") {
     return;
   }
-
   var url = new URL(req.url);
-
-  /* Hanya tangani permintaan same-origin. */
   if (url.origin !== self.location.origin) {
     return;
   }
 
-  /* Permintaan navigasi: utamakan jaringan, fallback ke index.html dari cache. */
+  /* Navigasi (buka halaman) -> network-first, fallback index.html (SPA hash-router). */
   if (req.mode === "navigate") {
     event.respondWith(
-      fetch(req).catch(function () {
+      fetch(req).then(function (res) {
+        return putInCache(req, res);
+      }).catch(function () {
         return caches.match("./index.html").then(function (cached) {
           return cached || caches.match("./");
         });
@@ -97,23 +109,28 @@ self.addEventListener("fetch", function (event) {
     return;
   }
 
-  /* Aset statis: cache-first. */
+  /* Kode aplikasi (HTML/CSS/JS/manifest) -> network-first agar update langsung terlihat. */
+  var isAppCode = /\.(?:js|css|html|webmanifest)$/i.test(url.pathname);
+  if (isAppCode) {
+    event.respondWith(
+      fetch(req).then(function (res) {
+        return putInCache(req, res);
+      }).catch(function () {
+        return caches.match(req);
+      })
+    );
+    return;
+  }
+
+  /* Aset lain (font, ikon, gambar) -> cache-first. */
   event.respondWith(
     caches.match(req).then(function (cached) {
       if (cached) {
         return cached;
       }
       return fetch(req).then(function (res) {
-        /* Simpan salinan ke cache bila respons valid & dapat disimpan. */
-        if (res && res.status === 200 && (res.type === "basic" || res.type === "default")) {
-          var copy = res.clone();
-          caches.open(CACHE).then(function (cache) {
-            cache.put(req, copy);
-          });
-        }
-        return res;
+        return putInCache(req, res);
       }).catch(function () {
-        /* Tidak ada di cache & jaringan gagal: tidak ada yang bisa diberikan. */
         return cached;
       });
     })
