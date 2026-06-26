@@ -28,7 +28,7 @@ const Charts = (() => {
   }
 
   /* =========================================================
-     Gauge lingkaran kecil untuk skor kepercayaan (0–100).
+     Gauge lingkaran kecil untuk indikator pembayaran (0–100).
      Pusat angka digambar oleh HTML (.gnum) di atasnya.
      ========================================================= */
   function gauge(score, color = "#54BD9A") {

@@ -4,7 +4,22 @@
 
 const Calc = (() => {
   const DAY = 86400000;
-  const toTime = (v) => { const n = new Date(v).getTime(); return isNaN(n) ? 0 : n; };
+  const MAX_MONEY = 1_000_000_000_000_000;
+  const BACKUP_VERSION = 2;
+  const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+  function dateValue(v) {
+    if (typeof v === "string") {
+      const match = ISO_DATE.exec(v);
+      if (match) {
+        const d = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+        if (d.getFullYear() === Number(match[1]) && d.getMonth() === Number(match[2]) - 1 && d.getDate() === Number(match[3])) return d;
+        return new Date(NaN);
+      }
+    }
+    return new Date(v);
+  }
+  const toTime = (v) => { const n = dateValue(v).getTime(); return isNaN(n) ? 0 : n; };
 
   // ---------- ID unik ----------
   function uid() {
@@ -30,15 +45,21 @@ const Calc = (() => {
     return digits ? parseInt(digits, 10) : 0;
   }
   function tanggal(iso, opt = "short") {
-    const d = new Date(iso);
+    const d = dateValue(iso);
     if (isNaN(d)) return "-";
     if (opt === "long") return d.toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
     return d.toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
   }
-  function todayISO() { return new Date().toISOString().slice(0, 10); }
+  function dateToLocalISO(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+  function todayISO() { return dateToLocalISO(new Date()); }
 
   function waktuRelatif(iso, now = Date.now()) {
-    const d = new Date(iso).getTime();
+    const d = toTime(iso);
     if (isNaN(d)) return "-";
     const diff = Math.floor((now - d) / DAY);
     if (diff < 0) return tanggal(iso);
@@ -71,32 +92,43 @@ const Calc = (() => {
 
   // ---------- Ringkasan pinjaman ----------
   function loanSummary(loan, payments) {
-    const pays = payments.filter((p) => p.loanId === loan.id);
-    const paid = pays.reduce((s, p) => s + (Number(p.amount) || 0), 0);
-    const remaining = Math.max(0, (Number(loan.amount) || 0) - paid);
+    const amount = Math.max(0, Number(loan && loan.amount) || 0);
+    const pays = (payments || []).filter((p) => p.loanId === loan.id);
+    const rawPaid = pays.reduce((sum, payment) => sum + Math.max(0, Number(payment.amount) || 0), 0);
+    // Pembayaran berlebih tidak boleh menutupi pinjaman lain pada ringkasan.
+    const paid = Math.min(amount, rawPaid);
+    const remaining = Math.max(0, amount - paid);
     return {
       paid,
+      rawPaid,
+      overpaid: Math.max(0, rawPaid - amount),
       remaining,
-      percent: pct(paid, loan.amount),
-      lunas: remaining <= 0,
+      percent: pct(paid, amount),
+      lunas: amount > 0 && remaining <= 0,
       paymentCount: pays.length,
-      payments: pays.slice().sort((a, b) => new Date(a.date) - new Date(b.date)),
+      payments: pays.slice().sort((a, b) =>
+        (toTime(a.date) - toTime(b.date)) || (toTime(a.createdAt || a.date) - toTime(b.createdAt || b.date))
+      ),
     };
   }
 
   // ---------- Ringkasan debitur ----------
   function debtorSummary(debtor, loans, payments) {
-    const dl = loans.filter((l) => l.debtorId === debtor.id);
-    const dp = payments.filter((p) => p.debtorId === debtor.id);
-    const totalBorrowed = dl.reduce((s, l) => s + (Number(l.amount) || 0), 0);
-    const totalPaid = dp.reduce((s, p) => s + (Number(p.amount) || 0), 0);
-    const remaining = Math.max(0, totalBorrowed - totalPaid);
-    // aktivitas terakhir = tanggal pembayaran terbaru, atau tanggal pinjaman terbaru
+    const dl = (loans || []).filter((loan) => loan.debtorId === debtor.id);
+    const loanIds = new Set(dl.map((loan) => loan.id));
+    const relatedPayments = (payments || []).filter((payment) => loanIds.has(payment.loanId));
+    const summaries = dl.map((loan) => loanSummary(loan, relatedPayments));
+    const totalBorrowed = dl.reduce((sum, loan) => sum + Math.max(0, Number(loan.amount) || 0), 0);
+    const totalPaid = summaries.reduce((sum, item) => sum + item.paid, 0);
+    const remaining = summaries.reduce((sum, item) => sum + item.remaining, 0);
+
+    // Aktivitas terakhir hanya memakai pembayaran yang benar-benar terkait pinjaman debitur.
     let lastActivity = null;
-    [...dl.map((l) => l.date), ...dp.map((p) => p.date)].forEach((d) => {
-      const t = new Date(d).getTime();
-      if (!isNaN(t) && (lastActivity === null || t > lastActivity)) lastActivity = t;
+    [...dl.map((loan) => loan.date), ...relatedPayments.map((payment) => payment.date)].forEach((value) => {
+      const time = toTime(value);
+      if (time && (lastActivity === null || time > lastActivity)) lastActivity = time;
     });
+
     return {
       loanCount: dl.length,
       totalBorrowed,
@@ -107,8 +139,6 @@ const Calc = (() => {
       hasDebt: remaining > 0,
       lastActivity,
       // tanggal terbaru dulu; bila tanggalnya sama, yang paling baru DIINPUT
-      // tampil lebih dulu. createdAt presisi dipakai sebagai pemecah seri,
-      // karena urutan dari IndexedDB (getAll) mengikuti id acak, bukan waktu input.
       loans: dl.slice().sort((a, b) =>
         (toTime(b.date) - toTime(a.date)) ||
         (toTime(b.createdAt || b.date) - toTime(a.createdAt || a.date))
@@ -148,27 +178,33 @@ const Calc = (() => {
 
   // ---------- Ringkasan global (dashboard) ----------
   function globalSummary(debtors, loans, payments) {
-    const totalBorrowed = loans.reduce((s, l) => s + (Number(l.amount) || 0), 0);
-    const totalPaid = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
-    const totalActive = Math.max(0, totalBorrowed - totalPaid);
+    const loanList = loans || [];
+    const paymentList = payments || [];
+    const summaries = loanList.map((loan) => loanSummary(loan, paymentList));
+    const totalBorrowed = loanList.reduce((sum, loan) => sum + Math.max(0, Number(loan.amount) || 0), 0);
+    const totalPaid = summaries.reduce((sum, item) => sum + item.paid, 0);
+    const totalActive = summaries.reduce((sum, item) => sum + item.remaining, 0);
+    const validLoanIds = new Set(loanList.map((loan) => loan.id));
     let activeDebtors = 0;
-    debtors.forEach((d) => { if (debtorSummary(d, loans, payments).hasDebt) activeDebtors++; });
+    (debtors || []).forEach((debtor) => {
+      if (debtorSummary(debtor, loanList, paymentList).hasDebt) activeDebtors++;
+    });
     return {
       totalActive,
       totalBorrowed,
       totalPaid,
-      debtorCount: debtors.length,
+      debtorCount: (debtors || []).length,
       activeDebtors,
       repaymentRate: pct(totalPaid, totalBorrowed),
-      loanCount: loans.length,
-      paymentCount: payments.length,
+      loanCount: loanList.length,
+      paymentCount: paymentList.filter((payment) => validLoanIds.has(payment.loanId)).length,
     };
   }
 
-  // ---------- Skor Kepercayaan ----------
-  // Heuristik sederhana & transparan, 0–100.
-  // Mulai dari 100, dikurangi bila pinjaman lama menganggur tanpa bayar,
-  // dan disesuaikan dengan kecepatan pelunasan pinjaman yang sudah lunas.
+  // ---------- Indikator Aktivitas Pembayaran ----------
+  // Heuristik aktivitas 0–100, bukan penilaian kelayakan kredit.
+  // Nilai turun bila pinjaman lama tidak memiliki aktivitas pembayaran dan
+  // disesuaikan dengan durasi penyelesaian pinjaman yang sudah lunas.
   function trustScore(debtor, loans, payments, now = Date.now()) {
     const dl = loans.filter((l) => l.debtorId === debtor.id);
     if (dl.length === 0) {
@@ -177,7 +213,7 @@ const Calc = (() => {
     let score = 100;
     const durations = [];
     const reasons = [];
-    let overdueCount = 0;
+    let idleCount = 0;
 
     dl.forEach((loan) => {
       const sm = loanSummary(loan, payments);
@@ -187,8 +223,8 @@ const Calc = (() => {
       } else {
         const lastPay = sm.payments.length ? new Date(sm.payments[sm.payments.length - 1].date).getTime() : new Date(loan.date).getTime();
         const idle = Math.round((now - lastPay) / DAY);
-        if (idle > 90) { score -= 25; overdueCount++; }
-        else if (idle > 60) { score -= 15; overdueCount++; }
+        if (idle > 90) { score -= 25; idleCount++; }
+        else if (idle > 60) { score -= 15; idleCount++; }
         else if (idle > 30) { score -= 7; }
       }
     });
@@ -200,16 +236,16 @@ const Calc = (() => {
       else if (avg > 30) { score -= 5; }
       else { score += 3; reasons.push("pelunasan cepat"); }
     }
-    if (overdueCount) reasons.push(`${overdueCount} pinjaman menunggak`);
+    if (idleCount) reasons.push(`${idleCount} pinjaman lama tanpa aktivitas`);
 
     score = Math.max(0, Math.min(100, Math.round(score)));
 
     let category, label, emoji, color;
-    if (score >= 80) { category = "lancar"; label = "Lancar"; emoji = "🟢"; color = "green"; }
-    else if (score >= 60) { category = "terlambat"; label = "Sering Terlambat"; emoji = "🟡"; color = "yellow"; }
-    else { category = "risiko"; label = "Risiko Tinggi"; emoji = "🔴"; color = "red"; }
+    if (score >= 80) { category = "aktif"; label = "Aktivitas Baik"; emoji = "🟢"; color = "green"; }
+    else if (score >= 60) { category = "pantau"; label = "Perlu Dipantau"; emoji = "🟡"; color = "yellow"; }
+    else { category = "lama"; label = "Lama Tanpa Aktivitas"; emoji = "🔴"; color = "red"; }
 
-    return { score, category, label, emoji, color, reason: reasons.length ? reasons.join(", ") : "Riwayat baik." };
+    return { score, category, label, emoji, color, reason: reasons.length ? reasons.join(", ") : "Aktivitas pembayaran tercatat baik." };
   }
 
   // ---------- Pengingat ----------
@@ -234,20 +270,163 @@ const Calc = (() => {
     return out.sort((a, b) => b.days - a.days);
   }
 
-  // ---------- Validasi import ----------
+  // ---------- Validasi & normalisasi import ----------
+  function cleanText(value, max, required = false) {
+    if (value == null) value = "";
+    if (typeof value !== "string") return null;
+    const text = value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").trim();
+    if ((required && !text) || text.length > max) return null;
+    return text;
+  }
+
+  function cleanId(value) {
+    if (typeof value !== "string") return null;
+    const id = value.trim();
+    return /^[A-Za-z0-9._:-]{1,128}$/.test(id) ? id : null;
+  }
+
+  function cleanMoney(value) {
+    const number = Number(value);
+    return Number.isSafeInteger(number) && number > 0 && number <= MAX_MONEY ? number : null;
+  }
+
+  function cleanDate(value) {
+    if (typeof value !== "string" || !ISO_DATE.test(value) || !toTime(value)) return null;
+    return value;
+  }
+
+  function cleanCreatedAt(value, fallback) {
+    if (value == null || value === "") return fallback;
+    if (typeof value !== "string" || !toTime(value)) return null;
+    return value;
+  }
+
+  function imageDataInfo(value, maxBytes) {
+    if (value === "") return { ok: true, value: "", type: "" };
+    if (typeof value !== "string") return { ok: false };
+    const match = /^data:image\/(jpeg|png|webp|gif);base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(value);
+    if (!match) return { ok: false };
+    const encoded = match[2].replace(/\s/g, "");
+    const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+    const bytes = Math.max(0, Math.floor(encoded.length * 3 / 4) - padding);
+    if (bytes > maxBytes) return { ok: false, tooLarge: true };
+    return { ok: true, value: `data:image/${match[1].toLowerCase()};base64,${encoded}`, type: `image/${match[1].toLowerCase()}`, bytes };
+  }
+
+  function failImport(message) { return { ok: false, error: message }; }
+
   function validateImport(obj) {
-    if (!obj || typeof obj !== "object") return { ok: false, error: "Berkas tidak valid." };
-    if (!Array.isArray(obj.debtors)) return { ok: false, error: "Format tidak dikenali (debitur tidak ditemukan)." };
-    const debtors = obj.debtors || [];
-    const loans = obj.loans || [];
-    const payments = obj.payments || [];
-    if (!Array.isArray(loans) || !Array.isArray(payments)) return { ok: false, error: "Struktur data rusak." };
-    return { ok: true, data: { debtors, loans, payments } };
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return failImport("Berkas tidak valid.");
+    if (obj.app != null && obj.app !== "PiutangKu") return failImport("Berkas bukan cadangan PiutangKu.");
+    if (obj.version != null && (!Number.isInteger(Number(obj.version)) || Number(obj.version) > BACKUP_VERSION)) {
+      return failImport("Versi cadangan lebih baru dan belum didukung aplikasi ini.");
+    }
+    if (!Array.isArray(obj.debtors)) return failImport("Format tidak dikenali: daftar debitur tidak ditemukan.");
+    if (!Array.isArray(obj.loans) || !Array.isArray(obj.payments)) return failImport("Struktur pinjaman atau pembayaran rusak.");
+    if (obj.debtors.length > 10000 || obj.loans.length > 50000 || obj.payments.length > 100000) {
+      return failImport("Cadangan terlalu besar untuk diproses dengan aman.");
+    }
+
+    const debtors = [];
+    const debtorIds = new Set();
+    for (let i = 0; i < obj.debtors.length; i++) {
+      const source = obj.debtors[i];
+      if (!source || typeof source !== "object" || Array.isArray(source)) return failImport(`Debitur ke-${i + 1} tidak valid.`);
+      const id = cleanId(source.id);
+      const name = cleanText(source.name, 120, true);
+      if (!id || debtorIds.has(id)) return failImport(`ID debitur ke-${i + 1} tidak valid atau duplikat.`);
+      if (!name) return failImport(`Nama debitur ke-${i + 1} kosong atau terlalu panjang.`);
+      const phone = cleanText(source.phone, 40);
+      const tag = cleanText(source.tag, 60);
+      const note = cleanText(source.note, 2000);
+      if (phone == null || tag == null || note == null) return failImport(`Teks pada debitur “${name}” melewati batas aman.`);
+      const photo = imageDataInfo(source.photo || "", 600 * 1024);
+      if (!photo.ok) return failImport(`Foto debitur “${name}” tidak valid atau terlalu besar.`);
+      const createdAt = cleanCreatedAt(source.createdAt, todayISO());
+      if (!createdAt) return failImport(`Tanggal pembuatan debitur “${name}” tidak valid.`);
+      const normalized = { id, name, phone, tag, note, photo: photo.value, createdAt };
+      const emoji = cleanText(source.emoji, 8);
+      const color = typeof source.color === "string" && /^#[0-9A-Fa-f]{6}$/.test(source.color) ? source.color : "";
+      if (emoji) normalized.emoji = emoji;
+      if (color) normalized.color = color;
+      if (source.loanSort && typeof source.loanSort === "object") {
+        const by = ["amount", "date", "manual"].includes(source.loanSort.by) ? source.loanSort.by : "date";
+        normalized.loanSort = { by, dir: source.loanSort.dir === "asc" ? "asc" : "desc" };
+      }
+      debtors.push(normalized);
+      debtorIds.add(id);
+    }
+
+    const loans = [];
+    const loanIds = new Set();
+    const loanById = new Map();
+    for (let i = 0; i < obj.loans.length; i++) {
+      const source = obj.loans[i];
+      if (!source || typeof source !== "object" || Array.isArray(source)) return failImport(`Pinjaman ke-${i + 1} tidak valid.`);
+      const id = cleanId(source.id);
+      const debtorId = cleanId(source.debtorId);
+      const amount = cleanMoney(source.amount);
+      const date = cleanDate(source.date);
+      const description = cleanText(source.description || "Pinjaman", 300, true);
+      if (!id || loanIds.has(id)) return failImport(`ID pinjaman ke-${i + 1} tidak valid atau duplikat.`);
+      if (!debtorId || !debtorIds.has(debtorId)) return failImport(`Pinjaman ke-${i + 1} merujuk debitur yang tidak ditemukan.`);
+      if (!amount) return failImport(`Nominal pinjaman ke-${i + 1} tidak valid.`);
+      if (!date) return failImport(`Tanggal pinjaman ke-${i + 1} tidak valid.`);
+      if (!description) return failImport(`Keterangan pinjaman ke-${i + 1} tidak valid.`);
+      const createdAt = cleanCreatedAt(source.createdAt, date);
+      if (!createdAt) return failImport(`Waktu pembuatan pinjaman ke-${i + 1} tidak valid.`);
+      const sourceAttachments = source.attachments == null ? [] : source.attachments;
+      if (!Array.isArray(sourceAttachments) || sourceAttachments.length > 8) return failImport(`Lampiran pinjaman ke-${i + 1} melebihi batas 8 gambar.`);
+      const attachments = [];
+      for (let j = 0; j < sourceAttachments.length; j++) {
+        const attachment = sourceAttachments[j];
+        if (!attachment || typeof attachment !== "object") return failImport(`Lampiran ${j + 1} pada pinjaman ke-${i + 1} rusak.`);
+        const image = imageDataInfo(attachment.dataUrl, 1600 * 1024);
+        const name = cleanText(attachment.name || `bukti-${j + 1}.jpg`, 120, true);
+        if (!image.ok || !name) return failImport(`Lampiran ${j + 1} pada pinjaman ke-${i + 1} tidak valid atau terlalu besar.`);
+        attachments.push({ name, type: image.type, dataUrl: image.value });
+      }
+      const normalized = { id, debtorId, amount, date, description, attachments, createdAt };
+      if (Number.isFinite(source.order)) normalized.order = Math.max(0, Math.floor(source.order));
+      loans.push(normalized);
+      loanIds.add(id);
+      loanById.set(id, normalized);
+    }
+
+    const payments = [];
+    const paymentIds = new Set();
+    const paidByLoan = new Map();
+    for (let i = 0; i < obj.payments.length; i++) {
+      const source = obj.payments[i];
+      if (!source || typeof source !== "object" || Array.isArray(source)) return failImport(`Pembayaran ke-${i + 1} tidak valid.`);
+      const id = cleanId(source.id);
+      const loanId = cleanId(source.loanId);
+      const debtorId = cleanId(source.debtorId);
+      const amount = cleanMoney(source.amount);
+      const date = cleanDate(source.date);
+      const note = cleanText(source.note, 300);
+      if (!id || paymentIds.has(id)) return failImport(`ID pembayaran ke-${i + 1} tidak valid atau duplikat.`);
+      const loan = loanById.get(loanId);
+      if (!loan) return failImport(`Pembayaran ke-${i + 1} merujuk pinjaman yang tidak ditemukan.`);
+      if (!debtorId || debtorId !== loan.debtorId) return failImport(`Relasi debitur pada pembayaran ke-${i + 1} tidak konsisten.`);
+      if (!amount) return failImport(`Nominal pembayaran ke-${i + 1} tidak valid.`);
+      if (!date) return failImport(`Tanggal pembayaran ke-${i + 1} tidak valid.`);
+      if (note == null) return failImport(`Catatan pembayaran ke-${i + 1} terlalu panjang.`);
+      const nextPaid = (paidByLoan.get(loanId) || 0) + amount;
+      if (nextPaid > loan.amount) return failImport(`Total pembayaran untuk “${loan.description}” melebihi nominal pinjaman.`);
+      const createdAt = cleanCreatedAt(source.createdAt, date);
+      if (!createdAt) return failImport(`Waktu pembuatan pembayaran ke-${i + 1} tidak valid.`);
+      payments.push({ id, loanId, debtorId, amount, date, note, createdAt });
+      paymentIds.add(id);
+      paidByLoan.set(loanId, nextPaid);
+    }
+
+    return { ok: true, data: { debtors, loans, payments }, version: BACKUP_VERSION };
   }
 
   // ---------- Data contoh ----------
   function sampleData(now = Date.now()) {
-    const iso = (daysAgo) => new Date(now - daysAgo * DAY).toISOString().slice(0, 10);
+    const iso = (daysAgo) => dateToLocalISO(new Date(now - daysAgo * DAY));
     const debtors = [];
     const loans = [];
     const payments = [];
@@ -295,12 +474,12 @@ const Calc = (() => {
     const eko = D("Eko", "0838-9898-1010", "UMKM", "");
     L(eko, 1000000, 5, "Pinjam tambah stok");
 
-    // Menunggak agak lama -> skor "Sering Terlambat" 🟡 + memicu pengingat
+    // Lama tanpa aktivitas -> indikator "Perlu Dipantau" + memicu pengingat
     const hadi = D("Hadi", "0852-1212-3434", "Teman", "Sering telat bayar.");
     const lh = L(hadi, 2000000, 130, "Pinjam renovasi rumah");
     P(lh, hadi, 500000, 100);
 
-    // Menunggak parah -> skor "Risiko Tinggi" 🔴 + pengingat
+    // Sangat lama tanpa aktivitas -> indikator merah + pengingat
     const bayu = D("Bayu", "0899-5656-7878", "Kenalan", "");
     L(bayu, 1000000, 200, "Pinjam usaha (belum jelas)");
     L(bayu, 500000, 150, "Pinjam tambahan");
@@ -320,7 +499,7 @@ const Calc = (() => {
     uid, rupiah, rupiahShort, parseRupiah, tanggal, todayISO, waktuRelatif, pct,
     avatarColor, initials,
     loanSummary, debtorSummary, globalSummary, smartAllocate,
-    trustScore, reminders, validateImport, sampleData,
+    trustScore, reminders, validateImport, sampleData, dateToLocalISO, BACKUP_VERSION,
   };
 })();
 

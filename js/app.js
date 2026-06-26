@@ -20,6 +20,16 @@
   let deferredPrompt = null;      // event beforeinstallprompt
   let installDismissed = false;
   let paySheet = null;            // komposer pembayaran SmartPay: {debtorId, mode, amount, alloc}
+  let storageInfo = { usage: null, quota: null, persisted: null };
+  let waitingWorker = null;
+  let lastModalFocus = null;
+  let modalSeq = 0;
+
+  const MAX_MONEY = 1_000_000_000_000_000;
+  const MAX_ATTACHMENTS = 8;
+  const MAX_SOURCE_IMAGE_BYTES = 12 * 1024 * 1024;
+  const MAX_ATTACHMENT_BYTES = 1600 * 1024;
+  const MAX_AVATAR_BYTES = 600 * 1024;
 
   /* ---------------------------------------------------------
      Util kecil
@@ -34,6 +44,58 @@
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
+  const escapeAttr = escapeHtml;
+
+  function safeImageSrc(value) {
+    const src = String(value || "");
+    return /^data:image\/(?:jpeg|png|webp|gif);base64,[A-Za-z0-9+/=\r\n]+$/i.test(src) ? src : "";
+  }
+
+  function dataUrlBytes(value) {
+    const encoded = String(value || "").split(",")[1] || "";
+    const clean = encoded.replace(/\s/g, "");
+    const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
+    return Math.max(0, Math.floor(clean.length * 3 / 4) - padding);
+  }
+
+  function formatBytes(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "—";
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 ** 2) return `${(n / 1024).toLocaleString("id-ID", { maximumFractionDigits: 1 })} KB`;
+    return `${(n / 1024 ** 2).toLocaleString("id-ID", { maximumFractionDigits: 1 })} MB`;
+  }
+
+  function isQuotaError(error) {
+    return error && (error.name === "QuotaExceededError" || error.code === 22 || error.code === 1014);
+  }
+
+  function userErrorMessage(error) {
+    if (isQuotaError(error)) return "Penyimpanan perangkat penuh. Hapus beberapa lampiran atau buat cadangan lalu bersihkan data.";
+    if (error && error.code === "DB_BLOCKED") return error.message;
+    if (error && error.message) return error.message;
+    return "Terjadi kesalahan. Data belum diubah.";
+  }
+
+  function mergeById(current, incoming) {
+    const map = new Map((current || []).map((item) => [item.id, item]));
+    (incoming || []).forEach((item) => map.set(item.id, item));
+    return Array.from(map.values());
+  }
+
+  function validMoney(value) {
+    return Number.isSafeInteger(value) && value > 0 && value <= MAX_MONEY;
+  }
+
+  function getLastBackup() {
+    try { return localStorage.getItem("piutangku:lastBackup"); }
+    catch (_) { return null; }
+  }
+
+  function rememberBackup() {
+    try { rememberBackup(); }
+    catch (_) {}
+  }
   function icon(id, size) {
     const s = size ? ` style="width:${size}px;height:${size}px"` : "";
     return `<svg${s} aria-hidden="true"><use href="#${id}"/></svg>`;
@@ -47,8 +109,9 @@
   }
   function avatarHtml(d, size) {
     const cls = size === "lg" ? " lg" : size === "sm" ? " sm" : "";
-    if (d.photo) {
-      return `<div class="avatar${cls} has-photo"><img src="${d.photo}" alt="" loading="lazy"></div>`;
+    const photo = safeImageSrc(d.photo);
+    if (photo) {
+      return `<div class="avatar${cls} has-photo"><img src="${escapeAttr(photo)}" alt="" loading="lazy"></div>`;
     }
     const base = d.color || Calc.avatarColor(d.name || "?");
     const bg = `linear-gradient(135deg, ${shade(base, 0.95)}, ${shade(base, 0.72)})`;
@@ -133,7 +196,8 @@
      Render shell
      --------------------------------------------------------- */
   function navItem(key, href, ic, label, active) {
-    return `<a class="nav-item${active === key ? " active" : ""}" href="${href}">${icon(ic)}<span>${label}</span></a>`;
+    const current = active === key;
+    return `<a class="nav-item${current ? " active" : ""}" href="${href}"${current ? ' aria-current="page"' : ""}>${icon(ic)}<span>${label}</span></a>`;
   }
   function bottomNav(active) {
     return `<nav class="bottom-nav">
@@ -151,10 +215,11 @@
       `<div class="${screenCls}">${inner}</div>` +
       (nav ? bottomNav(opts.active || "") : "") +
       (opts.fab ? `<button class="fab-float" data-act="${opts.fab.act}" ${opts.fab.data || ""} aria-label="${opts.fab.label}">${icon("ic-plus")}</button>` : "") +
-      `<div class="toast-host"></div>`;
+      `<div class="toast-host" role="status" aria-live="polite" aria-atomic="true"></div>`;
     const sc = $app.querySelector(".screen");
     if (sc) sc.scrollTop = 0;
     if (pendingToast) { toast(pendingToast.text, pendingToast.type); pendingToast = null; }
+    if (waitingWorker) showUpdateBanner(waitingWorker);
   }
 
   /* ---------------------------------------------------------
@@ -352,7 +417,7 @@
           </div>` : ""}
           <button class="add-loan-link" data-act="add-loan" data-debtor="${d.id}">${icon("ic-plus")} Tambah</button>
         </div></div>
-      ${manualMode ? `<div class="sort-hint" id="sort-hint">${icon("ic-info", 13)} Mode atur manual aktif — seret kartu lewat gagang di kirinya untuk mengubah urutan.</div>` : ""}
+      ${manualMode ? `<div class="sort-hint" id="sort-hint">${icon("ic-info", 13)} Mode atur manual aktif — seret gagang, atau fokuskan gagang lalu gunakan tombol panah atas/bawah.</div>` : ""}
       <div class="list stagger${manualMode ? " manual-sort" : ""}" id="loan-list" data-debtor="${d.id}">${loansHtml}</div>
       ${s.loans.length ? `<button class="del-loans-btn" data-act="del-loans-open" data-debtor="${d.id}">${icon("ic-trash", 15)} Hapus Item Hutang</button>` : ""}
       <div style="height:18px"></div>
@@ -364,7 +429,7 @@
       return `<div class="trust">
         <div class="trust-top">
           <div class="trust-gauge">${Charts.gauge(0, "var(--lav-300)")}<div class="gnum">–</div></div>
-          <div class="trust-info"><div class="tlabel">Skor Kepercayaan</div>
+          <div class="trust-info"><div class="tlabel">Indikator Pembayaran</div>
             <div class="trust-cat"><span style="color:var(--lav-700)">⚪ Baru</span></div></div>
         </div>
         <div class="trust-hint">${escapeHtml(ts.reason)}</div>
@@ -380,12 +445,12 @@
       <div class="trust-top">
         <div class="trust-gauge">${Charts.gauge(ts.score, col)}<div class="gnum">${ts.score}</div></div>
         <div class="trust-info">
-          <div class="tlabel">Skor Kepercayaan</div>
+          <div class="tlabel">Indikator Pembayaran</div>
           <div class="trust-cat"><span>${ts.emoji}</span><span style="color:${col}">${ts.label}</span></div>
         </div>
       </div>
       <div class="trust-bars">${bars}</div>
-      <div class="trust-hint">${icon("ic-info", 12)} ${escapeHtml(cap(ts.reason))}</div>
+      <div class="trust-hint">${icon("ic-info", 12)} ${escapeHtml(cap(ts.reason))}<br>Indikator ini membaca aktivitas pembayaran, bukan kelayakan kredit atau tanggal jatuh tempo.</div>
     </div>`;
   }
   function cap(s) { s = String(s || ""); return s.charAt(0).toUpperCase() + s.slice(1); }
@@ -421,7 +486,7 @@
     }
     return [
       { label: "Pelunasan", val: repay, color: "var(--mint-500)" },
-      { label: "Ketepatan", val: punct, color: "var(--lav-500)" },
+      { label: "Aktivitas", val: punct, color: "var(--lav-500)" },
       { label: "Kecepatan", val: speed, color: "var(--orange-500)" },
     ];
   }
@@ -430,7 +495,7 @@
     const ls = Calc.loanSummary(l, state.payments);
     const inner = `
       <div class="loan-top">
-        ${manual ? `<span class="drag-handle" aria-label="Seret untuk mengatur urutan">${icon("ic-dots-h")}</span>` : ""}
+        ${manual ? `<span class="drag-handle" role="button" tabindex="0" data-loan="${escapeAttr(l.id)}" aria-label="Atur urutan ${escapeAttr(l.description || "pinjaman")}. Gunakan panah atas atau bawah.">${icon("ic-dots-h")}</span>` : ""}
         <div class="loan-head"><div class="loan-title">${escapeHtml(l.description || "Pinjaman")}</div>
           <div class="loan-date">${tanggal(l.date)}${l.attachments && l.attachments.length ? " · " + icon("ic-image", 11) + " " + l.attachments.length : ""}</div></div>
         <div class="loan-amt tnum">${rupiah(l.amount)}</div>
@@ -442,9 +507,9 @@
       </div>
       <div class="mini-prog"><span style="width:${ls.percent}%"></span></div>`;
     if (manual) {
-      return `<div class="loan-card sortable${ls.lunas ? " settled" : ""}" data-loan-id="${l.id}">${inner}</div>`;
+      return `<div class="loan-card sortable${ls.lunas ? " settled" : ""}" data-loan-id="${escapeAttr(l.id)}">${inner}</div>`;
     }
-    return `<button class="loan-card${ls.lunas ? " settled" : ""}" data-act="go" data-go="/pinjaman/${l.id}" data-loan-id="${l.id}">${inner}</button>`;
+    return `<button class="loan-card${ls.lunas ? " settled" : ""}" data-act="go" data-go="/pinjaman/${encodeURIComponent(l.id)}" data-loan-id="${escapeAttr(l.id)}">${inner}</button>`;
   }
 
   /* ---- Popup "Urutkan" (cascade) untuk daftar pinjaman ---- */
@@ -512,8 +577,9 @@
     if (!d) return;
     const cur = getLoanSort(d);
     const dir = (cur.by === by) ? (cur.dir === "asc" ? "desc" : "asc") : "asc";  // klik kedua = balik arah
-    d.loanSort = { by, dir };
-    try { await DB.put("debtors", d); } catch (_) {}
+    const updated = { ...d, loanSort: { by, dir } };
+    await DB.put("debtors", updated);
+    Object.assign(d, updated);
     refreshLoanList(d);
     const pop = $app.querySelector(".sort-pop");
     if (pop) pop.innerHTML = sortPopInner(d);   // popup tetap terbuka, perbarui status
@@ -525,10 +591,8 @@
     const ordered = sortLoansFor(d, s.loans);
     ordered.forEach((l, i) => { const ll = byId("loans", l.id); if (ll) ll.order = i; });
     d.loanSort = { by: "manual", dir: "asc" };
-    try {
-      await DB.put("debtors", d);
-      for (const l of ordered) { const ll = byId("loans", l.id); if (ll) await DB.put("loans", ll); }
-    } catch (_) {}
+    const changedLoans = ordered.map((loan) => byId("loans", loan.id)).filter(Boolean);
+    await DB.putDebtorAndLoans(d, changedLoans);
     closeSortPop();
     rerender();   // render ulang profil agar muncul gagang seret + petunjuk
   }
@@ -569,8 +633,11 @@
     const attachments = (l.attachments && l.attachments.length) || true ? `
       <div class="summary"><h3>Bukti / Lampiran</h3>
         <div class="attach-row" style="margin-top:0">
-          ${(l.attachments || []).map((a, i) => `<div class="attach-thumb"><img src="${a.dataUrl}" alt="${escapeHtml(a.name || "bukti")}">
-            <button class="x" data-act="del-attach" data-loan="${l.id}" data-idx="${i}" aria-label="Hapus">${icon("ic-x")}</button></div>`).join("")}
+          ${(l.attachments || []).map((a, i) => {
+            const src = safeImageSrc(a.dataUrl);
+            return src ? `<div class="attach-thumb"><img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || "bukti")}">
+            <button class="x" data-act="del-attach" data-loan="${escapeAttr(l.id)}" data-idx="${i}" aria-label="Hapus lampiran ${i + 1}">${icon("ic-x")}</button></div>` : "";
+          }).join("")}
           <button class="attach-add" data-act="add-attach" data-loan="${l.id}" aria-label="Tambah bukti">${icon("ic-plus")}</button>
         </div>
       </div>` : "";
@@ -754,7 +821,37 @@
   /* ---------------------------------------------------------
      CADANGKAN & PULIHKAN
      --------------------------------------------------------- */
-  function renderData() {
+  async function refreshStorageInfo(requestPersistence = false) {
+    if (!navigator.storage) return storageInfo;
+    try {
+      if (requestPersistence && navigator.storage.persist) await navigator.storage.persist();
+      const [estimate, persisted] = await Promise.all([
+        navigator.storage.estimate ? navigator.storage.estimate() : Promise.resolve({}),
+        navigator.storage.persisted ? navigator.storage.persisted() : Promise.resolve(null),
+      ]);
+      storageInfo = {
+        usage: Number.isFinite(estimate.usage) ? estimate.usage : null,
+        quota: Number.isFinite(estimate.quota) ? estimate.quota : null,
+        persisted: typeof persisted === "boolean" ? persisted : null,
+      };
+    } catch (_) {}
+    return storageInfo;
+  }
+
+  function renderData(loadStorage = true) {
+    const lastBackup = getLastBackup();
+    const backupLabel = lastBackup ? tanggal(lastBackup, "long") : "Belum pernah pada perangkat ini";
+    const used = formatBytes(storageInfo.usage);
+    const quota = formatBytes(storageInfo.quota);
+    const percent = storageInfo.usage != null && storageInfo.quota
+      ? Math.min(100, Math.round(storageInfo.usage / storageInfo.quota * 100))
+      : null;
+    const persistText = storageInfo.persisted === true
+      ? "Dilindungi dari pembersihan otomatis browser"
+      : storageInfo.persisted === false
+        ? "Belum dilindungi dari pembersihan otomatis browser"
+        : "Status perlindungan tidak tersedia";
+
     render(`
       <header class="topbar solid">
         <button class="icon-btn" data-act="back" aria-label="Kembali">${icon("ic-back")}</button>
@@ -762,73 +859,104 @@
       </header>
       <div class="io-card exp">
         <h3>${icon("ic-download")} Cadangkan Data</h3>
-        <p>Simpan seluruh catatan ke satu berkas <b>.json</b>. Berguna untuk pindah perangkat atau berjaga-jaga.</p>
+        <p>Simpan seluruh catatan ke satu berkas <b>.json</b>. Berkas dapat memuat nomor telepon, foto, dan bukti transaksi—simpan di tempat aman.</p>
         <button class="btn btn-ghost" data-act="export">${icon("ic-download")} Unduh File Cadangan</button>
+        <div class="backup-meta">Cadangan terakhir: <b>${escapeHtml(backupLabel)}</b></div>
       </div>
       <div class="io-card imp" style="margin-top:14px">
         <h3>${icon("ic-upload")} Pulihkan Data</h3>
-        <p>Muat berkas cadangan <b>.json</b>. Kamu bisa mengganti seluruh data atau menggabungkannya.</p>
+        <p>Muat berkas cadangan <b>.json</b>. Struktur, relasi, nominal, tanggal, dan lampiran akan divalidasi sebelum ditulis.</p>
         <button class="btn btn-ghost" data-act="import-pick">${icon("ic-upload")} Pilih File Cadangan</button>
       </div>
+      <div class="storage-card">
+        <div class="storage-head"><span class="storage-icon">${icon("ic-folder")}</span><div><h3>Penyimpanan Perangkat</h3><p>${escapeHtml(persistText)}</p></div></div>
+        <div class="storage-values"><span>Terpakai <b>${used}</b></span><span>Kapasitas <b>${quota}</b></span></div>
+        ${percent == null ? "" : `<div class="storage-track" aria-label="Penyimpanan terpakai ${percent}%"><span style="width:${percent}%"></span></div>`}
+        ${storageInfo.persisted === false ? `<button class="btn btn-soft sm storage-persist" data-act="storage-persist">${icon("ic-shield")} Lindungi Penyimpanan</button>` : ""}
+      </div>
       <div class="io-info"><span>${icon("ic-shield")}</span>
-        <div class="it"><b>Privasi</b>Datamu tidak pernah dikirim ke mana pun. Semuanya tersimpan lokal di browser perangkat ini.</div></div>
+        <div class="it"><b>Privasi</b>Data aplikasi tidak dikirim ke server. Namun, data browser tetap dapat hilang bila situs dibersihkan atau perangkat rusak; buat cadangan secara berkala.</div></div>
       <div style="height:14px"></div>
     `, { nav: false });
+
+    if (loadStorage) {
+      refreshStorageInfo().then(() => {
+        if (location.hash === "#/data") renderData(false);
+      });
+    }
   }
+
 
   /* ---------------------------------------------------------
      SHEET & DIALOG
      --------------------------------------------------------- */
+  function modalFocusables(root) {
+    return Array.from(root.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )).filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+  }
+
   function closeScrim() {
     paySheet = null;
-    $app.querySelectorAll(".scrim").forEach((sc) => {
-      sc.classList.remove("show");
-      setTimeout(() => sc.remove(), 300);
+    const restore = lastModalFocus;
+    lastModalFocus = null;
+    $app.querySelectorAll(".scrim").forEach((scrim) => {
+      scrim.classList.remove("show");
+      setTimeout(() => scrim.remove(), 300);
     });
+    if (restore && restore.isConnected) setTimeout(() => restore.focus(), 320);
   }
-  // Pasang scrim secara deterministik:
-  // 1) buang scrim lama SEKARANG (bukan setelah 300ms) agar tak ada dua scrim bertumpuk
-  //    — inilah sumber bug "hanya muncul blur" saat membuka sheet dari sheet lain.
-  // 2) paksa reflow agar gaya awal (translateY/scale/opacity) ter-commit sebelum .show,
-  //    sehingga transisi buka SELALU berjalan (tidak kadang gagal seperti pada rAF tunggal).
+
+  // Pasang scrim secara deterministik dan pindahkan fokus ke dialog.
   function mountScrim(wrap) {
-    $app.querySelectorAll(".scrim").forEach((sc) => sc.remove());
+    if (!$app.querySelector(".scrim")) lastModalFocus = document.activeElement;
+    $app.querySelectorAll(".scrim").forEach((scrim) => scrim.remove());
     $app.appendChild(wrap);
     void wrap.getBoundingClientRect();
-    requestAnimationFrame(() => wrap.classList.add("show"));
+    requestAnimationFrame(() => {
+      wrap.classList.add("show");
+      const focusables = modalFocusables(wrap);
+      const preferred = wrap.querySelector("[data-autofocus]") || focusables[0];
+      if (preferred) preferred.focus();
+    });
     return wrap;
   }
+
   function openSheet(title, body) {
     const wrap = document.createElement("div");
+    const id = `sheet-${++modalSeq}`;
     wrap.className = "scrim";
-    wrap.innerHTML = `<div class="sheet" role="dialog" aria-modal="true">
-      <div class="sheet-grip"></div>
-      <div class="sheet-head"><h3>${escapeHtml(title)}</h3>
-        <button class="icon-btn" data-act="close-sheet" aria-label="Tutup">${icon("ic-x")}</button></div>
+    wrap.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="${id}-title">
+      <div class="sheet-grip" aria-hidden="true"></div>
+      <div class="sheet-head"><h3 id="${id}-title">${escapeHtml(title)}</h3>
+        <button class="icon-btn" data-act="close-sheet" aria-label="Tutup dialog">${icon("ic-x")}</button></div>
       <div class="sheet-body">${body}</div></div>`;
     return mountScrim(wrap);
   }
+
   function openDialog({ icon: dic, tone, title, msg, confirmLabel, confirmClass, cancelLabel, act, data, stack }) {
     const wrap = document.createElement("div");
+    const id = `dialog-${++modalSeq}`;
     wrap.className = "scrim center";
-    const cancelBtn = `<button class="btn btn-ghost" data-act="close-sheet">${escapeHtml(cancelLabel || "Batal")}</button>`;
-    const confirmBtn = `<button class="btn ${confirmClass || "btn-danger"}" data-act="${act}" ${data || ""}>${escapeHtml(confirmLabel || "Hapus")}</button>`;
+    const cancelBtn = `<button class="btn btn-ghost" data-act="close-sheet" data-autofocus>${escapeHtml(cancelLabel || "Batal")}</button>`;
+    const confirmBtn = `<button class="btn ${confirmClass || "btn-danger"}" data-act="${escapeAttr(act)}" ${data || ""}>${escapeHtml(confirmLabel || "Hapus")}</button>`;
     const actions = stack
-      ? `<div class="dialog-actions stack">${confirmBtn}${cancelBtn}</div>`   // tumpuk: konfirmasi di atas, batal di bawah
+      ? `<div class="dialog-actions stack">${confirmBtn}${cancelBtn}</div>`
       : `<div class="dialog-actions">${cancelBtn}${confirmBtn}</div>`;
-    wrap.innerHTML = `<div class="dialog" role="alertdialog" aria-modal="true">
-      <div class="dic ${tone || "ic-orange"}">${icon(dic || "ic-alert")}</div>
-      <h3>${escapeHtml(title)}</h3><p>${escapeHtml(msg)}</p>
+    wrap.innerHTML = `<div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="${id}-title" aria-describedby="${id}-desc">
+      <div class="dic ${tone || "ic-orange"}" aria-hidden="true">${icon(dic || "ic-alert")}</div>
+      <h3 id="${id}-title">${escapeHtml(title)}</h3><p id="${id}-desc">${escapeHtml(msg)}</p>
       ${actions}</div>`;
     return mountScrim(wrap);
   }
+
 
   const TAGS = ["Tetangga", "Keluarga", "Teman", "Pelanggan", "Warung", "UMKM", "Lainnya"];
 
   // isi bingkai foto (kotak + tombol hapus); dipakai ulang saat refresh
   function photoFrameInner() {
     const box = `<div class="photo-box${debtorPhoto ? " has" : ""}" data-act="photo-pick" role="button" tabindex="0" aria-label="Pilih foto debitur">${
-      debtorPhoto ? `<img src="${debtorPhoto}" alt="">` : `<span class="ph-empty">${icon("ic-camera")}</span>`
+      debtorPhoto && safeImageSrc(debtorPhoto) ? `<img src="${escapeAttr(safeImageSrc(debtorPhoto))}" alt="">` : `<span class="ph-empty">${icon("ic-camera")}</span>`
     }</div>`;
     const del = debtorPhoto ? `<button type="button" class="ph-del" data-act="photo-del" aria-label="Hapus foto">${icon("ic-x")}</button>` : "";
     return box + del;
@@ -843,7 +971,7 @@
     pickFile("image/*", false, async (files) => {
       if (!files.length) return;
       try { debtorPhoto = await resizeImage(files[0], 320); }
-      catch (_) { toast("Gagal membaca gambar", "err"); return; }
+      catch (error) { toast(userErrorMessage(error), "err"); return; }
       refreshPhotoBox();
     });
   }
@@ -869,10 +997,10 @@
       </div>
 
       <div class="field"><label>Nama debitur</label>
-        <input class="input" id="f-name" placeholder="cth. Budi Santoso" value="${d ? escapeHtml(d.name) : ""}" autocomplete="off"></div>
+        <input class="input" id="f-name" maxlength="120" placeholder="cth. Budi Santoso" value="${d ? escapeHtml(d.name) : ""}" autocomplete="off"></div>
 
       <div class="field"><label>No. telepon <span class="opt">(opsional)</span></label>
-        <input class="input" id="f-phone" inputmode="tel" placeholder="cth. 0812-3456-7890" value="${d ? escapeHtml(d.phone || "") : ""}" autocomplete="off"></div>
+        <input class="input" id="f-phone" maxlength="40" inputmode="tel" placeholder="cth. 0812-3456-7890" value="${d ? escapeHtml(d.phone || "") : ""}" autocomplete="off"></div>
 
       <div class="field"><label>Label <span class="opt">(opsional)</span></label>
         <div class="dd-wrap" data-dd>
@@ -883,11 +1011,11 @@
           <div class="dd-panel hidden">${ddItems}</div>
         </div>
         <input type="hidden" id="f-tag" value="${escapeHtml(selected)}">
-        <input class="input dd-custom" id="f-tag-custom" placeholder="Ketik label sendiri…" autocomplete="off"
+        <input class="input dd-custom" id="f-tag-custom" maxlength="60" placeholder="Ketik label sendiri…" autocomplete="off"
           value="${isCustomTag ? escapeHtml(tag) : ""}" style="margin-top:8px;${selected === "Lainnya" ? "" : "display:none"}"></div>
 
       <div class="field"><label>Catatan <span class="opt">(opsional)</span></label>
-        <textarea class="textarea" id="f-note" placeholder="cth. teman kerja, biasanya bayar tiap gajian">${d ? escapeHtml(d.note || "") : ""}</textarea></div>
+        <textarea class="textarea" id="f-note" maxlength="2000" placeholder="cth. teman kerja, biasanya bayar tiap gajian">${d ? escapeHtml(d.note || "") : ""}</textarea></div>
 
       <button class="btn btn-primary" data-act="${d ? "save-debtor" : "create-debtor"}" ${d ? `data-id="${d.id}"` : ""}>
         ${icon("ic-check")} ${d ? "Simpan Perubahan" : "Simpan Debitur"}</button>`;
@@ -909,7 +1037,7 @@
         <div class="input-icon"><span class="pre">Rp</span>
           <input class="input amount-input" id="f-amount" inputmode="numeric" data-input="rupiah" placeholder="0"></div></div>
       <div class="field"><label>Keterangan</label>
-        <input class="input" id="f-desc" placeholder="cth. pinjam untuk servis motor" autocomplete="off"></div>
+        <input class="input" id="f-desc" maxlength="300" placeholder="cth. pinjam untuk servis motor" autocomplete="off"></div>
       <div class="field"><label>Tanggal pinjam</label>
         <input class="input" id="f-date" type="date" value="${Calc.todayISO()}"></div>
       <div class="field"><label>Bukti / lampiran <span class="opt">(opsional)</span></label>
@@ -918,8 +1046,11 @@
       <button class="btn btn-primary" data-act="create-loan" ${debtorId ? `data-debtor="${debtorId}"` : ""}>${icon("ic-check")} Simpan Pinjaman</button>`;
   }
   function attachThumbs() {
-    return sheetAttachments.map((a, i) => `<div class="attach-thumb"><img src="${a.dataUrl}" alt="">
-      <button class="x" data-act="sheet-attach-del" data-idx="${i}" aria-label="Hapus">${icon("ic-x")}</button></div>`).join("");
+    return sheetAttachments.map((a, i) => {
+      const src = safeImageSrc(a.dataUrl);
+      return src ? `<div class="attach-thumb"><img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || `Lampiran ${i + 1}`)}">
+      <button class="x" data-act="sheet-attach-del" data-idx="${i}" aria-label="Hapus lampiran ${i + 1}">${icon("ic-x")}</button></div>` : "";
+    }).join("");
   }
   function openAddLoan(debtorId) {
     if (state.debtors.length === 0) {
@@ -940,7 +1071,7 @@
         <div class="input-icon"><span class="pre">Rp</span>
           <input class="input amount-input" id="f-amount" inputmode="numeric" data-input="rupiah" value="${Number(loan.amount || 0).toLocaleString("id-ID")}"></div></div>
       <div class="field"><label>Keterangan</label>
-        <input class="input" id="f-desc" placeholder="cth. pinjam untuk servis motor" value="${escapeHtml(loan.description || "")}" autocomplete="off"></div>
+        <input class="input" id="f-desc" maxlength="300" placeholder="cth. pinjam untuk servis motor" value="${escapeHtml(loan.description || "")}" autocomplete="off"></div>
       <div class="field"><label>Tanggal pinjam</label>
         <input class="input" id="f-date" type="date" value="${loan.date || Calc.todayISO()}"></div>
       <div class="field"><label>Bukti / lampiran <span class="opt">(opsional)</span></label>
@@ -952,14 +1083,17 @@
     const loan = byId("loans", id);
     if (!loan) return;
     const amount = Calc.parseRupiah(document.getElementById("f-amount").value);
-    if (!amount || amount <= 0) { toast("Jumlah pinjaman belum benar", "err"); return; }
+    if (!validMoney(amount)) { toast("Jumlah pinjaman belum benar atau terlalu besar", "err"); return; }
     const ls = Calc.loanSummary(loan, state.payments);
     if (amount < ls.paid) { toast("Tidak boleh kurang dari yang sudah dibayar (" + rupiah(ls.paid) + ")", "err"); return; }
-    loan.amount = amount;
-    loan.description = (document.getElementById("f-desc").value || "").trim() || "Pinjaman";
-    loan.date = document.getElementById("f-date").value || loan.date || Calc.todayISO();
-    loan.attachments = sheetAttachments.slice();
-    await DB.put("loans", loan);
+    const updated = {
+      ...loan,
+      amount,
+      description: (document.getElementById("f-desc").value || "").trim() || "Pinjaman",
+      date: document.getElementById("f-date").value || loan.date || Calc.todayISO(),
+      attachments: sheetAttachments.slice(),
+    };
+    await DB.saveLoan(updated);
     sheetAttachments = [];
     await refresh();
     rerender();
@@ -985,7 +1119,7 @@
       <div class="field"><label>Tanggal bayar</label>
         <input class="input" id="f-pay-date" type="date" value="${Calc.todayISO()}"></div>
       <div class="field"><label>Catatan <span class="opt">(opsional)</span></label>
-        <input class="input" id="f-pay-note" placeholder="cth. transfer / tunai" autocomplete="off"></div>
+        <input class="input" id="f-pay-note" maxlength="300" placeholder="cth. transfer / tunai" autocomplete="off"></div>
       <button class="btn btn-primary" data-act="create-payment" data-loan="${loan.id}">${icon("ic-check")} Catat Pembayaran</button>`;
   }
   function openAddPayment(loanId) {
@@ -1117,13 +1251,12 @@
     const note = paySheet.mode === "smart" ? "SmartPay" : "";
     const entries = Object.entries(alloc);
     let cleared = 0;
-    for (const [lid, pay] of entries) {
+    const createdAt = new Date().toISOString();
+    const records = entries.map(([lid, pay]) => {
       if (pay >= (remById[lid] || 0)) cleared++;
-      await DB.put("payments", {
-        id: Calc.uid(), loanId: lid, debtorId: d.id, amount: pay,
-        date, note, createdAt: new Date().toISOString(),
-      });
-    }
+      return { id: Calc.uid(), loanId: lid, debtorId: d.id, amount: pay, date, note, createdAt };
+    });
+    await DB.addPayments(records);
     paySheet = null;
     await refresh();
     rerender();
@@ -1147,7 +1280,7 @@
       <div class="center" style="padding:6px 4px 10px">
         <img src="icons/icon-192.png" alt="" style="width:72px;height:72px;border-radius:20px;margin:0 auto 12px;box-shadow:var(--sh-md)">
         <h3 style="font-size:19px;font-weight:800;color:var(--ink)">PiutangKu</h3>
-        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.0</p>
+        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.1</p>
       </div>
       <p style="font-size:13.5px;color:var(--text);line-height:1.6;margin:6px 2px">
         Aplikasi sederhana untuk mencatat siapa yang masih berutang kepadamu dan berapa sisanya.
@@ -1194,7 +1327,7 @@
     const debtorId = ctxDebtor || (document.getElementById("f-debtor") && document.getElementById("f-debtor").value);
     if (!debtorId) { toast("Pilih debitur dulu", "err"); return; }
     const amount = Calc.parseRupiah(document.getElementById("f-amount").value);
-    if (!amount || amount <= 0) { toast("Jumlah pinjaman belum benar", "err"); return; }
+    if (!validMoney(amount)) { toast("Jumlah pinjaman belum benar atau terlalu besar", "err"); return; }
     const desc = (document.getElementById("f-desc").value || "").trim();
     const date = document.getElementById("f-date").value || Calc.todayISO();
     const obj = {
@@ -1215,7 +1348,7 @@
     if (!loan) return;
     const ls = Calc.loanSummary(loan, state.payments);
     const amount = Calc.parseRupiah(document.getElementById("f-pay-amount").value);
-    if (!amount || amount <= 0) { toast("Jumlah pembayaran belum benar", "err"); return; }
+    if (!validMoney(amount)) { toast("Jumlah pembayaran belum benar atau terlalu besar", "err"); return; }
     if (amount > ls.remaining) { toast("Melebihi sisa pinjaman (" + rupiah(ls.remaining) + ")", "err"); return; }
     const obj = {
       id: Calc.uid(), loanId, debtorId: loan.debtorId, amount,
@@ -1223,7 +1356,7 @@
       note: (document.getElementById("f-pay-note").value || "").trim(),
       createdAt: Calc.todayISO(),
     };
-    await DB.put("payments", obj);
+    await DB.addPayments([obj]);
     await refresh();
     rerender();
     const after = Calc.loanSummary(byId("loans", loanId), state.payments);
@@ -1295,7 +1428,7 @@
     if (!d) return;
     const targets = delLoansTargets(d, mode);
     if (!targets.length) { toast("Tidak ada hutang yang dihapus", "err"); return; }
-    for (const l of targets) { await DB.deleteLoanCascade(l.id); }
+    await DB.deleteLoansCascade(targets.map((loan) => loan.id));
     await refresh();
     rerender();
     toast(`${targets.length} item hutang dihapus`, "ok");
@@ -1303,8 +1436,9 @@
   async function delAttachment(loanId, idx) {
     const loan = byId("loans", loanId);
     if (!loan || !loan.attachments) return;
-    loan.attachments.splice(idx, 1);
-    await DB.put("loans", loan);
+    const attachments = loan.attachments.slice();
+    attachments.splice(idx, 1);
+    await DB.put("loans", { ...loan, attachments });
     await refresh();
     rerender();
     toast("Lampiran dihapus", "ok");
@@ -1332,116 +1466,196 @@
     inp.click();
   }
   function readAsDataURL(file) {
-    return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
-  }
-  // Kecilkan & kompres gambar (untuk foto avatar) agar hemat penyimpanan & ukuran backup.
-  function resizeImage(file, max) {
     return new Promise((resolve, reject) => {
-      const fr = new FileReader();
-      fr.onload = () => {
-        const img = new Image();
-        img.onload = () => {
-          const scale = Math.min(1, max / Math.max(img.width, img.height));
-          const w = Math.max(1, Math.round(img.width * scale));
-          const h = Math.max(1, Math.round(img.height * scale));
-          const canvas = document.createElement("canvas");
-          canvas.width = w; canvas.height = h;
-          const ctx = canvas.getContext("2d");
-          ctx.drawImage(img, 0, 0, w, h);
-          try { resolve(canvas.toDataURL("image/jpeg", 0.85)); }
-          catch (e) { reject(e); }
-        };
-        img.onerror = reject;
-        img.src = fr.result;
-      };
-      fr.onerror = reject;
-      fr.readAsDataURL(file);
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error("Gambar tidak dapat dibaca."));
+      reader.readAsDataURL(file);
     });
   }
-  function readAsText(file) {
-    return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsText(file); });
+
+  function loadImage(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error("Format gambar tidak didukung."));
+      image.src = dataUrl;
+    });
   }
+
+  async function compressImage(file, { maxDimension, maxBytes, quality = 0.84 }) {
+    if (!file || !String(file.type || "").startsWith("image/")) throw new Error("Pilih berkas gambar yang valid.");
+    if (file.size > MAX_SOURCE_IMAGE_BYTES) throw new Error("Ukuran gambar asli maksimal 12 MB.");
+
+    const image = await loadImage(await readAsDataURL(file));
+    let scale = Math.min(1, maxDimension / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
+    let currentQuality = quality;
+    let dataUrl = "";
+
+    for (let attempt = 0; attempt < 7; attempt++) {
+      const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
+      const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) throw new Error("Perangkat tidak dapat memproses gambar.");
+      context.fillStyle = "#FFFFFF";
+      context.fillRect(0, 0, width, height);
+      context.drawImage(image, 0, 0, width, height);
+      dataUrl = canvas.toDataURL("image/jpeg", currentQuality);
+      if (dataUrlBytes(dataUrl) <= maxBytes) return dataUrl;
+      scale *= 0.82;
+      currentQuality = Math.max(0.58, currentQuality - 0.06);
+    }
+    throw new Error(`Gambar masih terlalu besar setelah dikompresi. Batas ${formatBytes(maxBytes)}.`);
+  }
+
+  function resizeImage(file, max) {
+    return compressImage(file, { maxDimension: max, maxBytes: MAX_AVATAR_BYTES, quality: 0.84 });
+  }
+
+  async function attachmentFromFile(file) {
+    const dataUrl = await compressImage(file, {
+      maxDimension: 1600,
+      maxBytes: MAX_ATTACHMENT_BYTES,
+      quality: 0.82,
+    });
+    const base = String(file.name || "bukti").replace(/\.[^.]+$/, "").slice(0, 110) || "bukti";
+    return { name: `${base}.jpg`, type: "image/jpeg", dataUrl };
+  }
+
+  function readAsText(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error("Berkas tidak dapat dibaca."));
+      reader.readAsText(file);
+    });
+  }
+
 
   function sheetAddAttachment() {
     pickFile("image/*", true, async (files) => {
-      for (const f of files) {
-        try { const url = await readAsDataURL(f); sheetAttachments.push({ name: f.name, type: f.type, dataUrl: url }); }
-        catch (_) { toast("Gagal membaca gambar", "err"); }
+      const room = Math.max(0, MAX_ATTACHMENTS - sheetAttachments.length);
+      if (!room) { toast(`Maksimal ${MAX_ATTACHMENTS} lampiran per pinjaman`, "err"); return; }
+      const selected = files.slice(0, room);
+      for (const file of selected) {
+        try { sheetAttachments.push(await attachmentFromFile(file)); }
+        catch (error) { toast(userErrorMessage(error), "err"); }
       }
+      if (files.length > room) toast(`Hanya ${room} gambar yang ditambahkan karena batas lampiran`, "err");
       const host = document.getElementById("f-attach");
       if (host) host.innerHTML = attachThumbs() + `<button class="attach-add" data-act="sheet-attach" aria-label="Tambah foto">${icon("ic-image")}</button>`;
     });
   }
+
   function loanAddAttachment(loanId) {
     pickFile("image/*", true, async (files) => {
       const loan = byId("loans", loanId);
       if (!loan) return;
-      loan.attachments = loan.attachments || [];
-      for (const f of files) {
-        try { const url = await readAsDataURL(f); loan.attachments.push({ name: f.name, type: f.type, dataUrl: url }); }
-        catch (_) { toast("Gagal membaca gambar", "err"); }
+      const current = (loan.attachments || []).slice();
+      const room = Math.max(0, MAX_ATTACHMENTS - current.length);
+      if (!room) { toast(`Maksimal ${MAX_ATTACHMENTS} lampiran per pinjaman`, "err"); return; }
+      for (const file of files.slice(0, room)) {
+        try { current.push(await attachmentFromFile(file)); }
+        catch (error) { toast(userErrorMessage(error), "err"); }
       }
-      await DB.put("loans", loan);
-      await refresh();
-      rerender();
-      toast("Bukti ditambahkan", "ok");
+      try {
+        await DB.put("loans", { ...loan, attachments: current });
+        await refresh();
+        rerender();
+        toast("Bukti ditambahkan", "ok");
+      } catch (error) {
+        toast(userErrorMessage(error), "err");
+      }
     });
   }
 
   function exportData() {
     const payload = {
-      app: "PiutangKu", version: 1, exportedAt: new Date().toISOString(),
-      debtors: state.debtors, loans: state.loans, payments: state.payments,
+      app: "PiutangKu",
+      version: Calc.BACKUP_VERSION || 2,
+      exportedAt: new Date().toISOString(),
+      debtors: state.debtors,
+      loans: state.loans,
+      payments: state.payments,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = "piutangku-backup-" + Calc.todayISO() + ".json";
-    document.body.appendChild(a); a.click(); a.remove();
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `piutangku-backup-${Calc.todayISO()}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    rememberBackup();
     toast("File cadangan diunduh", "ok");
+    if (location.hash === "#/data") renderData(false);
   }
+
   function importPick() {
     pickFile("application/json,.json", false, async (files) => {
       if (!files.length) return;
-      let obj;
-      try { obj = JSON.parse(await readAsText(files[0])); }
+      const file = files[0];
+      if (file.size > 50 * 1024 * 1024) { toast("Berkas cadangan maksimal 50 MB", "err"); return; }
+      let object;
+      try { object = JSON.parse(await readAsText(file)); }
       catch (_) { toast("Berkas bukan JSON yang valid", "err"); return; }
-      const v = Calc.validateImport(obj);
-      if (!v.ok) { toast(v.error, "err"); return; }
-      pendingImport = v.data;
+      const validation = Calc.validateImport(object);
+      if (!validation.ok) { toast(validation.error, "err"); return; }
+      pendingImport = validation.data;
       openSheet("Pulihkan Data", `
         <p style="font-size:13.5px;color:var(--text);line-height:1.55;margin:2px 2px 16px">
-          Ditemukan <b>${v.data.debtors.length} debitur</b>, <b>${v.data.loans.length} pinjaman</b>,
-          dan <b>${v.data.payments.length} pembayaran</b>. Pilih cara memuat:</p>
+          Ditemukan <b>${validation.data.debtors.length} debitur</b>, <b>${validation.data.loans.length} pinjaman</b>,
+          dan <b>${validation.data.payments.length} pembayaran</b>. Semua relasi dan nominal telah lolos validasi.</p>
         <button class="btn btn-primary" style="margin-bottom:10px" data-act="import-replace">${icon("ic-upload")} Ganti Semua Data</button>
         <button class="btn btn-lav" data-act="import-merge">${icon("ic-plus")} Gabungkan dengan Data Saat Ini</button>
-        <p class="muted center" style="font-size:11.5px;margin-top:12px">“Ganti” menghapus data lama lebih dulu. “Gabungkan” menambahkan & memperbarui berdasarkan ID.</p>`);
+        <p class="muted center" style="font-size:11.5px;margin-top:12px">“Ganti” menghapus data lama dalam transaksi yang sama. “Gabungkan” memperbarui record dengan ID yang sama lalu memvalidasi ulang seluruh hasil.</p>`);
     });
   }
+
   let pendingImport = null;
   async function doImport(mode) {
     if (!pendingImport) return;
-    if (mode === "replace") {
-      await DB.replaceAll(pendingImport);
-    } else {
-      for (const d of pendingImport.debtors) await DB.put("debtors", d);
-      for (const l of pendingImport.loans) await DB.put("loans", l);
-      for (const p of pendingImport.payments) await DB.put("payments", p);
+    let candidate = pendingImport;
+    if (mode === "merge") {
+      const merged = {
+        app: "PiutangKu",
+        version: Calc.BACKUP_VERSION || 2,
+        debtors: mergeById(state.debtors, pendingImport.debtors),
+        loans: mergeById(state.loans, pendingImport.loans),
+        payments: mergeById(state.payments, pendingImport.payments),
+      };
+      const validation = Calc.validateImport(merged);
+      if (!validation.ok) { toast(`Data gabungan ditolak: ${validation.error}`, "err"); return; }
+      candidate = validation.data;
     }
+    await DB.replaceAll(candidate);
     pendingImport = null;
     await refresh();
-    go("/", { text: mode === "replace" ? "Data diganti" : "Data digabungkan", type: "ok" });
+    await refreshStorageInfo();
+    go("/", { text: mode === "replace" ? "Data diganti secara aman" : "Data digabungkan secara aman", type: "ok" });
   }
+
 
   /* ---------------------------------------------------------
      Toast
      --------------------------------------------------------- */
   function toast(text, type) {
     let host = $app.querySelector(".toast-host");
-    if (!host) { host = document.createElement("div"); host.className = "toast-host"; $app.appendChild(host); }
+    if (!host) {
+      host = document.createElement("div");
+      host.className = "toast-host";
+      host.setAttribute("role", "status");
+      host.setAttribute("aria-live", "polite");
+      host.setAttribute("aria-atomic", "true");
+      $app.appendChild(host);
+    }
     const t = document.createElement("div");
     t.className = "toast " + (type === "err" ? "err" : "ok");
+    if (type === "err") t.setAttribute("role", "alert");
     t.innerHTML = `${icon(type === "err" ? "ic-alert" : "ic-check-circle")}<span>${escapeHtml(text)}</span>`;
     host.appendChild(t);
     requestAnimationFrame(() => t.classList.add("show"));
@@ -1463,9 +1677,28 @@
     $app.appendChild(b);
   }
 
+  function showUpdateBanner(worker) {
+    waitingWorker = worker || waitingWorker;
+    if (!waitingWorker || $app.querySelector(".update-banner")) return;
+    const banner = document.createElement("div");
+    banner.className = "install-banner update-banner";
+    banner.setAttribute("role", "status");
+    banner.innerHTML = `<img class="ib-logo" src="icons/icon-192.png" alt="">
+      <div class="ib-txt"><div class="t">Pembaruan siap</div><div class="d">Muat ulang untuk memakai versi terbaru.</div></div>
+      <button class="ib-btn" data-act="apply-update">Muat ulang</button>`;
+    $app.appendChild(banner);
+  }
+
   /* ---------------------------------------------------------
      Event delegation
      --------------------------------------------------------- */
+  const LOCKED_ACTIONS = new Set([
+    "pay-commit", "sort-by", "sort-manual", "seed",
+    "create-debtor", "save-debtor", "create-loan", "save-loan", "create-payment",
+    "del-attach", "confirm-del-debtor", "confirm-del-loan", "del-loans-do", "confirm-del-payment",
+    "confirm-seed", "confirm-clear", "import-replace", "import-merge", "storage-persist",
+  ]);
+
   $app.addEventListener("click", async (e) => {
     // tutup sheet saat menyentuh latar
     if (e.target.classList && e.target.classList.contains("scrim")) { closeScrim(); return; }
@@ -1487,8 +1720,17 @@
     const id = el.dataset.id;
     const loanId = el.dataset.loan;
     const debtorId = el.dataset.debtor;
+    const shouldLock = LOCKED_ACTIONS.has(act);
+    if (shouldLock && el.dataset.busy === "1") return;
+    const wasDisabled = "disabled" in el ? el.disabled : false;
+    if (shouldLock) {
+      el.dataset.busy = "1";
+      el.setAttribute("aria-busy", "true");
+      if ("disabled" in el) el.disabled = true;
+    }
 
-    switch (act) {
+    try {
+      switch (act) {
       case "go": go(el.dataset.go); break;
       case "back": history.length > 1 ? history.back() : go("/"); break;
       case "close-sheet": closeScrim(); break;
@@ -1630,6 +1872,16 @@
       case "import-pick": importPick(); break;
       case "import-replace": await doImport("replace"); break;
       case "import-merge": await doImport("merge"); break;
+      case "storage-persist": {
+        await refreshStorageInfo(true);
+        renderData(false);
+        toast(storageInfo.persisted ? "Penyimpanan berhasil dilindungi" : "Browser belum memberikan perlindungan penyimpanan", storageInfo.persisted ? "ok" : "err");
+        break;
+      }
+      case "apply-update":
+        if (waitingWorker) waitingWorker.postMessage({ type: "SKIP_WAITING" });
+        break;
+      case "reload-app": location.reload(); break;
 
       case "install":
         if (deferredPrompt) { deferredPrompt.prompt(); try { await deferredPrompt.userChoice; } catch (_) {} deferredPrompt = null; }
@@ -1638,12 +1890,41 @@
       case "dismiss-install":
         installDismissed = true; { const b = $app.querySelector(".install-banner"); if (b) b.remove(); }
         break;
+      }
+    } catch (error) {
+      console.error(error);
+      toast(userErrorMessage(error), "err");
+    } finally {
+      if (shouldLock && el.isConnected) {
+        delete el.dataset.busy;
+        el.removeAttribute("aria-busy");
+        if ("disabled" in el) el.disabled = wasDisabled;
+      }
     }
   });
 
   /* ---------------------------------------------------------
-     Seret manual daftar pinjaman (pointer/touch)
+     Seret manual daftar pinjaman (pointer/touch/keyboard)
      --------------------------------------------------------- */
+  async function persistVisibleLoanOrder(list) {
+    const ids = Array.from(list.querySelectorAll(".loan-card")).map((card) => card.dataset.loanId);
+    ids.forEach((id, index) => { const loan = byId("loans", id); if (loan) loan.order = index; });
+    await DB.putMany("loans", ids.map((id) => byId("loans", id)).filter(Boolean));
+  }
+
+  async function moveLoanByKeyboard(handle, direction) {
+    const card = handle.closest(".loan-card");
+    const list = card && card.closest("#loan-list");
+    if (!card || !list) return;
+    const sibling = direction < 0 ? card.previousElementSibling : card.nextElementSibling;
+    if (!sibling) return;
+    if (direction < 0) list.insertBefore(card, sibling);
+    else list.insertBefore(sibling, card);
+    await persistVisibleLoanOrder(list);
+    handle.focus();
+    toast("Urutan pinjaman diperbarui", "ok");
+  }
+
   let dragLoan = null;
   function onLoanDragMove(e) {
     if (!dragLoan) return;
@@ -1668,11 +1949,43 @@
     if (!d) return;
     d.el.classList.remove("dragging");
     document.body.classList.remove("dragging-active");
-    const ids = Array.from(d.list.querySelectorAll(".loan-card")).map((c) => c.dataset.loanId);
-    ids.forEach((lid, i) => { const l = byId("loans", lid); if (l) l.order = i; });
-    try { for (const lid of ids) { const l = byId("loans", lid); if (l) await DB.put("loans", l); } }
-    catch (_) {}
+    try { await persistVisibleLoanOrder(d.list); }
+    catch (error) { toast(userErrorMessage(error), "err"); }
   }
+  $app.addEventListener("keydown", async (event) => {
+    const scrim = event.target.closest && event.target.closest(".scrim");
+    if (scrim) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeScrim();
+        return;
+      }
+      if (event.key === "Tab") {
+        const focusables = modalFocusables(scrim);
+        if (!focusables.length) { event.preventDefault(); return; }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault(); last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault(); first.focus();
+        }
+      }
+    }
+
+    const photoButton = event.target.closest && event.target.closest('.photo-box[role="button"]');
+    if (photoButton && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault(); photoButton.click(); return;
+    }
+
+    const handle = event.target.closest && event.target.closest(".drag-handle");
+    if (handle && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+      event.preventDefault();
+      try { await moveLoanByKeyboard(handle, event.key === "ArrowUp" ? -1 : 1); }
+      catch (error) { toast(userErrorMessage(error), "err"); }
+    }
+  });
+
   $app.addEventListener("pointerdown", (e) => {
     const handle = e.target.closest(".drag-handle");
     if (!handle) return;
@@ -1725,7 +2038,9 @@
     else location.hash = "#" + path;
   }
   function route() {
-    const parts = location.hash.replace(/^#/, "").split("/").filter(Boolean);
+    const parts = location.hash.replace(/^#/, "").split("/").filter(Boolean).map((part) => {
+      try { return decodeURIComponent(part); } catch (_) { return part; }
+    });
     const top = parts[0] || "";
     // shortcut PWA
     if (top === "tambah-pinjaman") { history.replaceState(null, "", location.pathname + location.search + "#/"); renderHome(); openAddLoan(null); return; }
@@ -1746,12 +2061,45 @@
   /* ---------------------------------------------------------
      Boot
      --------------------------------------------------------- */
-  async function refresh() { state = await DB.snapshot(); }
+  async function refresh() {
+    const snapshot = await DB.snapshot();
+    const validation = Calc.validateImport(snapshot);
+    if (!validation.ok) throw new Error(`Data lokal tidak konsisten: ${validation.error}`);
+    state = validation.data;
+  }
 
+  function renderFatal(error) {
+    $app.innerHTML = `<div class="screen no-nav"><div class="empty" style="margin-top:30px">
+      <div class="e-art">${ART.calm}</div><h3>Data tidak dapat dibuka</h3>
+      <p>${escapeHtml(userErrorMessage(error))} Data tidak dihapus. Tutup tab PiutangKu lain atau muat ulang aplikasi.</p>
+      <button class="btn btn-primary" style="width:auto" data-act="reload-app">Muat Ulang</button>
+    </div></div>`;
+  }
+
+  let reloadingForUpdate = false;
   function registerSW() {
-    if ("serviceWorker" in navigator) {
-      window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
-    }
+    if (!("serviceWorker" in navigator)) return;
+    window.addEventListener("load", async () => {
+      try {
+        const registration = await navigator.serviceWorker.register("sw.js");
+        if (registration.waiting) showUpdateBanner(registration.waiting);
+        registration.addEventListener("updatefound", () => {
+          const worker = registration.installing;
+          if (!worker) return;
+          worker.addEventListener("statechange", () => {
+            if (worker.state === "installed" && navigator.serviceWorker.controller) showUpdateBanner(worker);
+          });
+        });
+      } catch (error) {
+        console.error("Service worker gagal didaftarkan", error);
+        toast("Mode offline belum aktif. Muat ulang saat tersambung internet.", "err");
+      }
+    });
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (reloadingForUpdate) return;
+      reloadingForUpdate = true;
+      location.reload();
+    });
   }
   window.addEventListener("beforeinstallprompt", (e) => {
     e.preventDefault(); deferredPrompt = e;
@@ -1761,11 +2109,23 @@
     deferredPrompt = null; const b = $app.querySelector(".install-banner"); if (b) b.remove();
   });
   window.addEventListener("hashchange", route);
+  window.addEventListener("piutangku:db-versionchange", () => {
+    openDialog({
+      icon: "ic-info", tone: "ic-lav", title: "Versi data diperbarui",
+      msg: "Tab lain memperbarui basis data. Muat ulang agar aplikasi memakai versi yang sama.",
+      confirmLabel: "Muat Ulang", confirmClass: "btn-primary", act: "reload-app",
+    });
+  });
 
   (async function init() {
-    try { await DB.open(); await refresh(); }
-    catch (err) { console.error(err); }
-    route();
+    try {
+      await DB.open();
+      await refresh();
+      route();
+    } catch (error) {
+      console.error(error);
+      renderFatal(error);
+    }
     registerSW();
   })();
 })();
