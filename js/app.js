@@ -961,11 +961,38 @@
     return mountScrim(wrap);
   }
 
-  // Dialog khusus di atas sheet pembayaran. Sheet utama tidak dibongkar agar
-  // seluruh nominal manual dan tanggal pembayaran tetap tersimpan.
-  function closeManualPayDialog({ restoreFocus = true, selectInput = false } = {}) {
+  // Dialog realokasi berada di atas sheet pembayaran. Sheet utama tidak
+  // dibongkar agar nominal SmartPay, tanggal, posisi scroll, dan alokasi lain
+  // tetap tersimpan selama pengguna memilih sumber dana.
+  function setManualAllocation(loanId, value) {
+    if (!paySheet || !loanId) return;
+    const amount = Math.max(0, Math.floor(Number(value) || 0));
+    if (amount > 0) paySheet.alloc[loanId] = amount;
+    else delete paySheet.alloc[loanId];
+  }
+
+  function manualInputCommittedValue(input) {
+    return Math.max(0, Math.floor(Number(input && input.dataset ? input.dataset.committed : 0) || 0));
+  }
+
+  function restoreManualTarget(current) {
+    if (!current || !paySheet) return;
+    setManualAllocation(current.loanId, current.previous);
+    if (current.input && current.input.isConnected) {
+      current.input.value = current.previous ? current.previous.toLocaleString("id-ID") : "";
+      current.input.dataset.committed = String(current.previous || 0);
+      setManualAmountInvalid(current.input, false);
+      updateManualRowOutcome(current.input, current.previous);
+    }
+    const footer = document.getElementById("pa-foot");
+    const debtor = byId("debtors", paySheet.debtorId);
+    if (footer && debtor) footer.innerHTML = payFootManual(debtor);
+  }
+
+  function closeManualPayDialog({ restoreFocus = true, selectInput = false, revertTarget = false } = {}) {
     const current = activeManualPayDialog;
     if (!current) return;
+    if (revertTarget) restoreManualTarget(current);
     activeManualPayDialog = null;
     current.root.classList.remove("show");
     setTimeout(() => current.root.remove(), 180);
@@ -980,30 +1007,160 @@
     }
   }
 
-  function openManualPayDialog(input, available) {
-    if (!input || !paySheet) return;
-    if (activeManualPayDialog) closeManualPayDialog({ restoreFocus: false });
+  function manualReallocationSources(targetLoanId) {
+    if (!paySheet) return [];
+    const debtor = byId("debtors", paySheet.debtorId);
+    const names = new Map(payActiveLoans(debtor).map((item) => [item.id, item.description]));
+    return Object.entries(paySheet.alloc || {})
+      .map(([id, value]) => ({
+        id,
+        name: names.get(id) || "Hutang",
+        allocated: Math.max(0, Math.floor(Number(value) || 0)),
+      }))
+      .filter((item) => item.id !== targetLoanId && item.allocated > 0)
+      .sort((a, b) => b.allocated - a.allocated || a.name.localeCompare(b.name, "id"));
+  }
 
+  function renderManualReallocationPrompt(current) {
+    const id = current.dialogId;
+    current.stage = "prompt";
+    current.root.innerHTML = `<div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="${id}-title" aria-describedby="${id}-desc">
+      <div class="dic ic-orange" aria-hidden="true">${icon("ic-info")}</div>
+      <h3 id="${id}-title">Alokasi Melebihi Sisa Pembayaran</h3>
+      <p id="${id}-desc">Nominal yang dimasukkan melebihi sisa pembayaran sebesar <b>${rupiah(current.needed)}</b>. Pilih pembayaran hutang lain yang ingin dikurangi untuk dialihkan ke <b>${escapeHtml(current.targetName)}</b>.</p>
+      <div class="dialog-actions stack">
+        <button class="btn btn-primary" data-act="pay-reallocate-open">Atur Ulang Alokasi</button>
+        <button class="btn btn-ghost" data-act="pay-reallocate-cancel" data-autofocus>Batal</button>
+      </div>
+    </div>`;
+  }
+
+  function reallocationSelectedTotal(current) {
+    return Object.values(current.reductions || {}).reduce(
+      (sum, value) => sum + Math.max(0, Math.floor(Number(value) || 0)), 0
+    );
+  }
+
+  function renderManualReallocationEditor(current) {
+    current.stage = "editor";
+    const id = current.dialogId;
+    const rows = current.sources.map((source) => {
+      const reduction = Math.max(0, Math.floor(Number(current.reductions[source.id]) || 0));
+      const after = Math.max(0, source.allocated - reduction);
+      return `<div class="realloc-row">
+        <div class="realloc-source-head">
+          <div class="realloc-source-name">${escapeHtml(source.name)}</div>
+          <div class="realloc-source-current">Dialokasikan ${rupiah(source.allocated)}</div>
+        </div>
+        <div class="realloc-source-edit">
+          <label class="realloc-input-wrap">
+            <span>Kurangi</span>
+            <span class="realloc-money"><b>Rp</b><input class="realloc-amt" data-input="rupiah" inputmode="numeric" data-source="${escapeAttr(source.id)}" data-max="${source.allocated}" value="${reduction ? reduction.toLocaleString("id-ID") : ""}" placeholder="0" aria-label="Kurangi alokasi ${escapeAttr(source.name)}"></span>
+          </label>
+          <div class="realloc-after">Setelah dikurangi <strong data-after-source="${escapeAttr(source.id)}">${rupiah(after)}</strong></div>
+        </div>
+      </div>`;
+    }).join("");
+
+    current.root.innerHTML = `<div class="dialog reallocation-dialog" role="dialog" aria-modal="true" aria-labelledby="${id}-title" aria-describedby="${id}-desc">
+      <div class="realloc-dialog-head">
+        <div><h3 id="${id}-title">Atur Ulang Alokasi</h3><p id="${id}-desc">Pilih satu atau beberapa pembayaran yang ingin dikurangi.</p></div>
+        <button class="icon-btn" data-act="pay-reallocate-cancel" aria-label="Tutup realokasi">${icon("ic-x")}</button>
+      </div>
+      <div class="realloc-dialog-body">
+        <div class="realloc-summary">
+          <div><span>Pembayaran ke ${escapeHtml(current.targetName)}</span><strong>${rupiah(current.requested)}</strong></div>
+          <div><span>Sisa pembayaran tersedia</span><strong>${rupiah(current.unallocated)}</strong></div>
+          <div><span>Nominal yang perlu dialihkan</span><strong>${rupiah(current.needed)}</strong></div>
+          <div><span>Nominal yang sudah dipilih</span><strong id="realloc-selected">${rupiah(reallocationSelectedTotal(current))}</strong></div>
+          <div class="realloc-summary-balance"><span id="realloc-balance-label">Kekurangan realokasi</span><strong id="realloc-balance">${rupiah(current.needed)}</strong></div>
+        </div>
+        <div class="realloc-source-title">Sumber alokasi</div>
+        <div class="realloc-list">${rows}</div>
+        <div class="realloc-hint" id="realloc-hint" role="status">Masih diperlukan realokasi sebesar ${rupiah(current.needed)}.</div>
+      </div>
+      <div class="realloc-dialog-actions">
+        <button class="btn btn-primary" data-act="pay-reallocate-apply" id="realloc-apply" disabled>${icon("ic-check")} Terapkan Realokasi</button>
+        <button class="btn btn-ghost" data-act="pay-reallocate-cancel">Batal</button>
+      </div>
+    </div>`;
+    updateManualReallocationUI();
+  }
+
+  function updateManualReallocationUI() {
+    const current = activeManualPayDialog;
+    if (!current || current.stage !== "editor") return;
+    let invalidSource = false;
+    current.root.querySelectorAll(".realloc-amt").forEach((input) => {
+      const source = current.sources.find((item) => item.id === input.dataset.source);
+      if (!source) return;
+      const value = Math.max(0, Math.floor(Calc.parseRupiah(input.value) || 0));
+      current.reductions[source.id] = value;
+      const invalid = value > source.allocated;
+      input.setAttribute("aria-invalid", invalid ? "true" : "false");
+      input.closest(".realloc-money").classList.toggle("invalid", invalid);
+      invalidSource = invalidSource || invalid;
+      const after = Array.from(current.root.querySelectorAll("[data-after-source]"))
+        .find((element) => element.dataset.afterSource === source.id);
+      if (after) after.textContent = rupiah(Math.max(0, source.allocated - value));
+    });
+
+    const selected = reallocationSelectedTotal(current);
+    const balance = current.needed - selected;
+    const selectedEl = current.root.querySelector("#realloc-selected");
+    const balanceEl = current.root.querySelector("#realloc-balance");
+    const balanceLabel = current.root.querySelector("#realloc-balance-label");
+    const hint = current.root.querySelector("#realloc-hint");
+    const apply = current.root.querySelector("#realloc-apply");
+    if (selectedEl) selectedEl.textContent = rupiah(selected);
+
+    if (balance > 0) {
+      if (balanceLabel) balanceLabel.textContent = "Kekurangan realokasi";
+      if (balanceEl) balanceEl.textContent = rupiah(balance);
+      if (hint) { hint.className = "realloc-hint"; hint.textContent = `Masih diperlukan realokasi sebesar ${rupiah(balance)}.`; }
+    } else if (balance < 0) {
+      if (balanceLabel) balanceLabel.textContent = "Kelebihan realokasi";
+      if (balanceEl) balanceEl.textContent = rupiah(Math.abs(balance));
+      if (hint) { hint.className = "realloc-hint over"; hint.textContent = `Nominal realokasi terlalu besar sebesar ${rupiah(Math.abs(balance))}.`; }
+    } else {
+      if (balanceLabel) balanceLabel.textContent = "Kekurangan realokasi";
+      if (balanceEl) balanceEl.textContent = rupiah(0);
+      if (hint) { hint.className = "realloc-hint ready"; hint.textContent = "Realokasi sudah seimbang dan siap diterapkan."; }
+    }
+    if (apply) apply.disabled = invalidSource || balance !== 0;
+  }
+
+  function openManualPayDialog(input, decision) {
+    if (!input || !paySheet || !decision || decision.type !== "reallocate") return;
+    if (activeManualPayDialog) closeManualPayDialog({ restoreFocus: false, revertTarget: true });
+
+    const loanId = input.dataset.loan || "";
+    const debtor = byId("debtors", paySheet.debtorId);
+    const target = payActiveLoans(debtor).find((item) => item.id === loanId);
     lastManualPayFocus = input;
     const root = document.createElement("div");
     const id = `manual-pay-dialog-${++modalSeq}`;
     root.className = "manual-pay-confirm";
-    root.innerHTML = `<div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="${id}-title" aria-describedby="${id}-desc">
-      <div class="dic ic-orange" aria-hidden="true">${icon("ic-info")}</div>
-      <h3 id="${id}-title">Nominal Melebihi Sisa</h3>
-      <p id="${id}-desc">Nominal input melebihi sisa pembayaran. Apakah ingin menggunakan nominal yang tersedia?</p>
-      <div class="dialog-actions stack">
-        <button class="btn btn-primary" data-act="pay-use-remaining">Gunakan Sisa ${escapeHtml(rupiah(available))}</button>
-        <button class="btn btn-ghost" data-act="pay-return-edit" data-autofocus>Kembali Edit</button>
-      </div>
-    </div>`;
 
+    const baseAlloc = Object.assign({}, paySheet.alloc || {});
+    if (decision.previous > 0) baseAlloc[loanId] = decision.previous;
+    else delete baseAlloc[loanId];
     activeManualPayDialog = {
       root,
+      dialogId: id,
       input,
-      loanId: input.dataset.loan || "",
-      available: Math.max(0, Math.floor(Number(available) || 0)),
+      loanId,
+      targetName: target ? target.description : "hutang target",
+      requested: decision.requested,
+      previous: decision.previous,
+      unallocated: decision.unallocated,
+      needed: decision.needed,
+      baseAlloc,
+      sources: manualReallocationSources(loanId),
+      reductions: {},
+      stage: "prompt",
     };
+    renderManualReallocationPrompt(activeManualPayDialog);
     $app.appendChild(root);
     void root.getBoundingClientRect();
     requestAnimationFrame(() => {
@@ -1013,18 +1170,53 @@
     });
   }
 
-  function applyManualPayRemainder() {
+  function openManualReallocationEditor() {
     const current = activeManualPayDialog;
-    if (!current || !paySheet) return;
-    const value = current.available;
-    if (value > 0) paySheet.alloc[current.loanId] = value;
-    else delete paySheet.alloc[current.loanId];
-    current.input.value = value ? value.toLocaleString("id-ID") : "";
-    setManualAmountInvalid(current.input, false);
-    const footer = document.getElementById("pa-foot");
+    if (!current) return;
+    if (!current.sources.length) {
+      toast("Tidak ada alokasi hutang lain yang dapat dialihkan", "err");
+      closeManualPayDialog({ selectInput: true, revertTarget: true });
+      return;
+    }
+    renderManualReallocationEditor(current);
+    requestAnimationFrame(() => {
+      const first = current.root.querySelector(".realloc-amt");
+      if (first) first.focus();
+    });
+  }
+
+  function applyManualReallocation() {
+    const current = activeManualPayDialog;
+    if (!current || !paySheet || current.stage !== "editor") return;
+    updateManualReallocationUI();
+    const plan = manualReallocationPlan(
+      current.baseAlloc,
+      current.loanId,
+      current.requested,
+      current.reductions,
+      paySheet.amount,
+      current.needed
+    );
+    if (!plan.ok) {
+      if (plan.type === "under") toast(`Masih diperlukan realokasi sebesar ${rupiah(plan.missing)}`, "err");
+      else if (plan.type === "over") toast(`Nominal realokasi terlalu besar sebesar ${rupiah(plan.excess)}`, "err");
+      else if (plan.type === "invalid-source") toast("Nominal pengurangan melebihi alokasi sumber", "err");
+      else toast("Realokasi gagal karena total alokasi tidak sama dengan pembayaran SmartPay", "err");
+      return;
+    }
+    paySheet.alloc = plan.alloc;
+
+    const sheetBody = $app.querySelector(".sheet-body");
+    const scrollTop = sheetBody ? sheetBody.scrollTop : 0;
     const debtor = byId("debtors", paySheet.debtorId);
-    if (footer && debtor) footer.innerHTML = payFootManual(debtor);
-    closeManualPayDialog();
+    closeManualPayDialog({ restoreFocus: false });
+    refreshPayAlloc(debtor);
+    if (sheetBody) requestAnimationFrame(() => { sheetBody.scrollTop = scrollTop; });
+    setTimeout(() => {
+      const input = Array.from($app.querySelectorAll(".pa-amt")).find((el) => el.dataset.loan === current.loanId);
+      if (input) input.focus();
+    }, 0);
+    toast(`Realokasi ke ${current.targetName} diterapkan`, "ok");
   }
 
 
@@ -1526,6 +1718,21 @@
     }, 0);
   }
 
+  function manualOutcomeText(remaining, allocated) {
+    const debt = Math.max(0, Math.floor(Number(remaining) || 0));
+    const pay = Math.max(0, Math.floor(Number(allocated) || 0));
+    if (pay >= debt && debt > 0) return `Sisa ${rupiah(debt)} · Lunas setelah pembayaran`;
+    if (pay > 0) return `Sisa ${rupiah(debt)} · Sisa setelah bayar ${rupiah(Math.max(0, debt - pay))}`;
+    return `Sisa ${rupiah(debt)} · Belum dialokasikan`;
+  }
+
+  function updateManualRowOutcome(input, allocated) {
+    if (!input) return;
+    const row = input.closest && input.closest(".pa-row");
+    const sub = row && row.querySelector(".pa-sub");
+    if (sub) sub.textContent = manualOutcomeText(input.dataset.max, allocated);
+  }
+
   function setManualAmountInvalid(input, invalid) {
     if (!input) return;
     if (invalid) input.setAttribute("aria-invalid", "true");
@@ -1534,18 +1741,76 @@
     if (wrap) wrap.classList.toggle("invalid", !!invalid);
   }
 
-  function manualAllocationDecision(requested, total, allocatedElsewhere, debtRemaining) {
+  function manualAllocationDecision(requested, total, allocatedElsewhere, debtRemaining, previousTarget = 0) {
     const value = Math.max(0, Math.floor(Number(requested) || 0));
     const sourceTotal = Math.max(0, Math.floor(Number(total) || 0));
     const usedElsewhere = Math.max(0, Math.floor(Number(allocatedElsewhere) || 0));
     const itemRemaining = Math.max(0, Math.floor(Number(debtRemaining) || 0));
+    const previous = Math.max(0, Math.floor(Number(previousTarget) || 0));
 
     if (value > sourceTotal) return { type: "over-total", max: sourceTotal };
     if (value > itemRemaining) return { type: "over-debt", max: itemRemaining };
 
-    const available = Math.max(0, sourceTotal - usedElsewhere);
-    if (value > available) return { type: "over-available", available };
-    return { type: "ok", available };
+    const currentTotal = usedElsewhere + previous;
+    const unallocated = Math.max(0, sourceTotal - currentTotal);
+    const availableForTarget = previous + unallocated;
+    if (value > availableForTarget) {
+      return {
+        type: "reallocate",
+        requested: value,
+        previous,
+        unallocated,
+        needed: value - availableForTarget,
+      };
+    }
+    return { type: "ok", unallocated };
+  }
+
+  function manualReallocationPlan(baseAlloc, targetLoanId, requested, reductions, total, needed) {
+    const next = {};
+    Object.entries(baseAlloc || {}).forEach(([id, value]) => {
+      const amount = Math.max(0, Math.floor(Number(value) || 0));
+      if (amount > 0) next[id] = amount;
+    });
+
+    let selected = 0;
+    for (const [sourceId, rawReduction] of Object.entries(reductions || {})) {
+      const reduction = Math.max(0, Math.floor(Number(rawReduction) || 0));
+      const original = Math.max(0, Math.floor(Number(next[sourceId]) || 0));
+      if (sourceId === targetLoanId || reduction > original) {
+        return { ok: false, type: "invalid-source", sourceId, max: original };
+      }
+      selected += reduction;
+      const after = original - reduction;
+      if (after > 0) next[sourceId] = after;
+      else delete next[sourceId];
+    }
+
+    const required = Math.max(0, Math.floor(Number(needed) || 0));
+    if (selected < required) return { ok: false, type: "under", missing: required - selected };
+    if (selected > required) return { ok: false, type: "over", excess: selected - required };
+
+    const targetAmount = Math.max(0, Math.floor(Number(requested) || 0));
+    if (targetAmount > 0) next[targetLoanId] = targetAmount;
+    else delete next[targetLoanId];
+    const finalTotal = Object.values(next).reduce((sum, value) => sum + value, 0);
+    const sourceTotal = Math.max(0, Math.floor(Number(total) || 0));
+    if (finalTotal !== sourceTotal) {
+      return { ok: false, type: "invalid-total", finalTotal, expected: sourceTotal };
+    }
+    return { ok: true, alloc: next, selected, finalTotal };
+  }
+
+  function restoreRejectedManualInput(input, previous) {
+    const loanId = input.dataset.loan || "";
+    setManualAllocation(loanId, previous);
+    input.value = previous ? previous.toLocaleString("id-ID") : "";
+    input.dataset.committed = String(previous || 0);
+    setManualAmountInvalid(input, true);
+    updateManualRowOutcome(input, previous);
+    const footer = document.getElementById("pa-foot");
+    const debtor = paySheet ? byId("debtors", paySheet.debtorId) : null;
+    if (footer && debtor) footer.innerHTML = payFootManual(debtor);
   }
 
   function validateManualAmountInput(input, { allowDialog = true } = {}) {
@@ -1555,35 +1820,39 @@
     const total = Math.max(0, Math.floor(Number(paySheet.amount) || 0));
     const loanId = input.dataset.loan || "";
     const debtRemaining = Math.max(0, Math.floor(Number(input.dataset.max) || 0));
+    const previous = manualInputCommittedValue(input);
 
-    if (requested > 0) paySheet.alloc[loanId] = requested;
-    else delete paySheet.alloc[loanId];
-
+    setManualAllocation(loanId, requested);
     const decision = manualAllocationDecision(
-      requested, total, manualAllocatedExcept(loanId), debtRemaining
+      requested, total, manualAllocatedExcept(loanId), debtRemaining, previous
     );
 
     if (decision.type === "over-total") {
-      setManualAmountInvalid(input, true);
-      toast(`Nominal input melebihi total pembayaran. Masukkan nominal maksimal ${rupiah(decision.max)}.`, "err");
+      restoreRejectedManualInput(input, previous);
+      toast(`Nominal input melebihi total pembayaran SmartPay. Masukkan nominal maksimal ${rupiah(decision.max)}.`, "err");
       focusManualAmount(input);
       return false;
     }
 
-    // Batas hutang lama tetap dipertahankan agar satu item tidak kelebihan bayar.
     if (decision.type === "over-debt") {
-      setManualAmountInvalid(input, true);
+      restoreRejectedManualInput(input, previous);
       toast(`Nominal input melebihi sisa hutang. Masukkan nominal maksimal ${rupiah(decision.max)}.`, "err");
       focusManualAmount(input);
       return false;
     }
 
-    if (decision.type === "over-available") {
+    if (decision.type === "reallocate") {
       setManualAmountInvalid(input, true);
-      if (allowDialog) openManualPayDialog(input, decision.available);
+      if (allowDialog) openManualPayDialog(input, decision);
       return false;
     }
+
+    input.dataset.committed = String(requested || 0);
     setManualAmountInvalid(input, false);
+    updateManualRowOutcome(input, requested);
+    const footer = document.getElementById("pa-foot");
+    const debtor = byId("debtors", paySheet.debtorId);
+    if (footer && debtor) footer.innerHTML = payFootManual(debtor);
     return true;
   }
 
@@ -1606,13 +1875,13 @@
     const amount = paySheet ? paySheet.amount : 0;
     if (paySheet && paySheet.mode === "manual") {
       const rows = items.map((it) => {
-        const val = paySheet.alloc[it.id];
-        const vStr = (typeof val === "number" && val > 0) ? Number(val).toLocaleString("id-ID") : "";
+        const val = Math.max(0, Math.floor(Number(paySheet.alloc[it.id]) || 0));
+        const vStr = val > 0 ? val.toLocaleString("id-ID") : "";
         return `<div class="pa-row manual">
           <div class="pa-info"><div class="pa-name">${escapeHtml(it.description)}</div>
-            <div class="pa-sub">Sisa ${rupiah(it.remaining)}</div></div>
+            <div class="pa-sub">${manualOutcomeText(it.remaining, val)}</div></div>
           <label class="pa-in"><span class="pre">Rp</span>
-            <input class="pa-amt" data-input="rupiah" inputmode="numeric" data-loan="${it.id}" data-max="${it.remaining}" placeholder="0" value="${vStr}"></label>
+            <input class="pa-amt" data-input="rupiah" inputmode="numeric" data-loan="${escapeAttr(it.id)}" data-max="${it.remaining}" data-committed="${val}" placeholder="0" value="${vStr}"></label>
         </div>`;
       }).join("");
       return `<div class="pa-list">${rows}</div>
@@ -1734,7 +2003,7 @@
       <div class="center" style="padding:6px 4px 10px">
         <img src="icons/icon-192.png" alt="" style="width:72px;height:72px;border-radius:20px;margin:0 auto 12px;box-shadow:var(--sh-md)">
         <h3 style="font-size:19px;font-weight:800;color:var(--ink)">PiutangKu</h3>
-        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.3</p>
+        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.4</p>
       </div>
       <p style="font-size:13.5px;color:var(--text);line-height:1.6;margin:6px 2px">
         Aplikasi sederhana untuk mencatat siapa yang masih berutang kepadamu dan berapa sisanya.
@@ -2156,7 +2425,7 @@
   $app.addEventListener("click", async (e) => {
     // Dialog validasi manual berada di atas sheet dan hanya menutup dirinya sendiri.
     if (e.target.classList && e.target.classList.contains("manual-pay-confirm")) {
-      closeManualPayDialog({ selectInput: true });
+      closeManualPayDialog({ selectInput: true, revertTarget: true });
       return;
     }
     // tutup sheet saat menyentuh latar
@@ -2193,8 +2462,9 @@
       case "go": go(el.dataset.go); break;
       case "back": history.length > 1 ? history.back() : go("/"); break;
       case "close-sheet": closeScrim(); break;
-      case "pay-use-remaining": applyManualPayRemainder(); break;
-      case "pay-return-edit": closeManualPayDialog({ selectInput: true }); break;
+      case "pay-reallocate-open": openManualReallocationEditor(); break;
+      case "pay-reallocate-cancel": closeManualPayDialog({ selectInput: true, revertTarget: true }); break;
+      case "pay-reallocate-apply": applyManualReallocation(); break;
 
       case "quick-add": openQuickAdd(); break;
       case "add-debtor": closeScrim(); openDebtorSheet(null); break;
@@ -2431,7 +2701,7 @@
     if (manualDialog) {
       if (event.key === "Escape") {
         event.preventDefault();
-        closeManualPayDialog({ selectInput: true });
+        closeManualPayDialog({ selectInput: true, revertTarget: true });
         return;
       }
       if (event.key === "Tab") {
@@ -2524,9 +2794,12 @@
     } else if (paySheet && t.classList.contains("pa-amt")) {
       setManualAmountInvalid(t, false);
       const v = Math.max(0, Math.floor(Calc.parseRupiah(t.value) || 0));
-      const lid = t.dataset.loan;
-      if (v > 0) paySheet.alloc[lid] = v; else delete paySheet.alloc[lid];
-      const f = document.getElementById("pa-foot"); if (f) f.innerHTML = payFootManual(byId("debtors", paySheet.debtorId));
+      setManualAllocation(t.dataset.loan, v);
+      updateManualRowOutcome(t, v);
+      const f = document.getElementById("pa-foot");
+      if (f) f.innerHTML = payFootManual(byId("debtors", paySheet.debtorId));
+    } else if (activeManualPayDialog && t.classList.contains("realloc-amt")) {
+      updateManualReallocationUI();
     }
   });
 
