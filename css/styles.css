@@ -498,6 +498,15 @@ body.attachment-viewer-open{overflow:hidden;touch-action:none;}
 .dialog-actions{display:flex;gap:10px;margin-top:18px;}
 .dialog-actions .btn{flex:1;}
 
+/* dialog validasi nominal di atas sheet pembayaran */
+.manual-pay-confirm{position:absolute;inset:0;z-index:75;background:rgba(28,44,38,.52);backdrop-filter:blur(3px);
+  -webkit-backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:24px;
+  opacity:0;transition:opacity .18s;}
+.manual-pay-confirm.show{opacity:1;}
+.manual-pay-confirm .dialog{transform:scale(.94);opacity:0;transition:transform .2s var(--ease),opacity .18s;}
+.manual-pay-confirm.show .dialog{transform:scale(1);opacity:1;}
+.manual-pay-confirm .dialog-actions .btn{min-height:48px;}
+
 /* ------------------------------ Forms ---------------------------------- */
 .field{margin-bottom:16px;}
 .field>label{display:block;font-size:13px;font-weight:600;color:var(--text);margin-bottom:7px;}
@@ -795,6 +804,7 @@ body.dragging-active{user-select:none;-webkit-user-select:none;cursor:grabbing;}
 .pa-in{display:flex;align-items:center;gap:4px;flex:none;width:128px;background:var(--bg-warm);border:1.5px solid var(--line);
   border-radius:11px;padding:8px 10px;transition:background .15s,border-color .15s;}
 .pa-in:focus-within{border-color:var(--mint-400);background:#fff;}
+.pa-in.invalid{border-color:var(--due);background:var(--due-bg);box-shadow:0 0 0 3px rgba(251,140,90,.12);}
 .pa-in .pre{color:var(--muted);font-weight:700;font-size:13px;}
 .pa-amt{flex:1;min-width:0;border:none;background:transparent;outline:none;text-align:right;
   font-size:14px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums;}
