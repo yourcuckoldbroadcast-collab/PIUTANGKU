@@ -27,6 +27,8 @@
   let activeAttachmentViewer = null;
   let lastAttachmentFocus = null;
   let attachmentViewerSeq = 0;
+  let activeManualPayDialog = null;
+  let lastManualPayFocus = null;
 
   const MAX_MONEY = 1_000_000_000_000_000;
   const MAX_ATTACHMENTS = 8;
@@ -905,6 +907,7 @@
   }
 
   function closeScrim() {
+    if (activeManualPayDialog) closeManualPayDialog({ restoreFocus: false });
     paySheet = null;
     const restore = lastModalFocus;
     lastModalFocus = null;
@@ -956,6 +959,72 @@
       <h3 id="${id}-title">${escapeHtml(title)}</h3><p id="${id}-desc">${escapeHtml(msg)}</p>
       ${actions}</div>`;
     return mountScrim(wrap);
+  }
+
+  // Dialog khusus di atas sheet pembayaran. Sheet utama tidak dibongkar agar
+  // seluruh nominal manual dan tanggal pembayaran tetap tersimpan.
+  function closeManualPayDialog({ restoreFocus = true, selectInput = false } = {}) {
+    const current = activeManualPayDialog;
+    if (!current) return;
+    activeManualPayDialog = null;
+    current.root.classList.remove("show");
+    setTimeout(() => current.root.remove(), 180);
+
+    const restore = lastManualPayFocus;
+    lastManualPayFocus = null;
+    if (restoreFocus && restore && restore.isConnected) {
+      setTimeout(() => {
+        restore.focus();
+        if (selectInput && typeof restore.select === "function") restore.select();
+      }, 200);
+    }
+  }
+
+  function openManualPayDialog(input, available) {
+    if (!input || !paySheet) return;
+    if (activeManualPayDialog) closeManualPayDialog({ restoreFocus: false });
+
+    lastManualPayFocus = input;
+    const root = document.createElement("div");
+    const id = `manual-pay-dialog-${++modalSeq}`;
+    root.className = "manual-pay-confirm";
+    root.innerHTML = `<div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="${id}-title" aria-describedby="${id}-desc">
+      <div class="dic ic-orange" aria-hidden="true">${icon("ic-info")}</div>
+      <h3 id="${id}-title">Nominal Melebihi Sisa</h3>
+      <p id="${id}-desc">Nominal input melebihi sisa pembayaran. Apakah ingin menggunakan nominal yang tersedia?</p>
+      <div class="dialog-actions stack">
+        <button class="btn btn-primary" data-act="pay-use-remaining">Gunakan Sisa ${escapeHtml(rupiah(available))}</button>
+        <button class="btn btn-ghost" data-act="pay-return-edit" data-autofocus>Kembali Edit</button>
+      </div>
+    </div>`;
+
+    activeManualPayDialog = {
+      root,
+      input,
+      loanId: input.dataset.loan || "",
+      available: Math.max(0, Math.floor(Number(available) || 0)),
+    };
+    $app.appendChild(root);
+    void root.getBoundingClientRect();
+    requestAnimationFrame(() => {
+      root.classList.add("show");
+      const preferred = root.querySelector("[data-autofocus]") || modalFocusables(root)[0];
+      if (preferred) preferred.focus();
+    });
+  }
+
+  function applyManualPayRemainder() {
+    const current = activeManualPayDialog;
+    if (!current || !paySheet) return;
+    const value = current.available;
+    if (value > 0) paySheet.alloc[current.loanId] = value;
+    else delete paySheet.alloc[current.loanId];
+    current.input.value = value ? value.toLocaleString("id-ID") : "";
+    setManualAmountInvalid(current.input, false);
+    const footer = document.getElementById("pa-foot");
+    const debtor = byId("debtors", paySheet.debtorId);
+    if (footer && debtor) footer.innerHTML = payFootManual(debtor);
+    closeManualPayDialog();
   }
 
 
@@ -1441,6 +1510,91 @@
       .filter((x) => x.remaining > 0)
       .sort((a, b) => (a.remaining - b.remaining) || (_toTime(a.createdAt || a.date) - _toTime(b.createdAt || b.date)));
   }
+  function manualAllocatedExcept(loanId) {
+    if (!paySheet) return 0;
+    return Object.entries(paySheet.alloc || {}).reduce((sum, [id, value]) => {
+      if (id === loanId) return sum;
+      return sum + Math.max(0, Math.floor(Number(value) || 0));
+    }, 0);
+  }
+
+  function focusManualAmount(input) {
+    if (!input || !input.isConnected) return;
+    setTimeout(() => {
+      input.focus();
+      if (typeof input.select === "function") input.select();
+    }, 0);
+  }
+
+  function setManualAmountInvalid(input, invalid) {
+    if (!input) return;
+    if (invalid) input.setAttribute("aria-invalid", "true");
+    else input.removeAttribute("aria-invalid");
+    const wrap = input.closest && input.closest(".pa-in");
+    if (wrap) wrap.classList.toggle("invalid", !!invalid);
+  }
+
+  function manualAllocationDecision(requested, total, allocatedElsewhere, debtRemaining) {
+    const value = Math.max(0, Math.floor(Number(requested) || 0));
+    const sourceTotal = Math.max(0, Math.floor(Number(total) || 0));
+    const usedElsewhere = Math.max(0, Math.floor(Number(allocatedElsewhere) || 0));
+    const itemRemaining = Math.max(0, Math.floor(Number(debtRemaining) || 0));
+
+    if (value > sourceTotal) return { type: "over-total", max: sourceTotal };
+    if (value > itemRemaining) return { type: "over-debt", max: itemRemaining };
+
+    const available = Math.max(0, sourceTotal - usedElsewhere);
+    if (value > available) return { type: "over-available", available };
+    return { type: "ok", available };
+  }
+
+  function validateManualAmountInput(input, { allowDialog = true } = {}) {
+    if (!paySheet || paySheet.mode !== "manual" || !input) return true;
+
+    const requested = Math.max(0, Math.floor(Calc.parseRupiah(input.value) || 0));
+    const total = Math.max(0, Math.floor(Number(paySheet.amount) || 0));
+    const loanId = input.dataset.loan || "";
+    const debtRemaining = Math.max(0, Math.floor(Number(input.dataset.max) || 0));
+
+    if (requested > 0) paySheet.alloc[loanId] = requested;
+    else delete paySheet.alloc[loanId];
+
+    const decision = manualAllocationDecision(
+      requested, total, manualAllocatedExcept(loanId), debtRemaining
+    );
+
+    if (decision.type === "over-total") {
+      setManualAmountInvalid(input, true);
+      toast(`Nominal input melebihi total pembayaran. Masukkan nominal maksimal ${rupiah(decision.max)}.`, "err");
+      focusManualAmount(input);
+      return false;
+    }
+
+    // Batas hutang lama tetap dipertahankan agar satu item tidak kelebihan bayar.
+    if (decision.type === "over-debt") {
+      setManualAmountInvalid(input, true);
+      toast(`Nominal input melebihi sisa hutang. Masukkan nominal maksimal ${rupiah(decision.max)}.`, "err");
+      focusManualAmount(input);
+      return false;
+    }
+
+    if (decision.type === "over-available") {
+      setManualAmountInvalid(input, true);
+      if (allowDialog) openManualPayDialog(input, decision.available);
+      return false;
+    }
+    setManualAmountInvalid(input, false);
+    return true;
+  }
+
+  function validateAllManualAmounts() {
+    const inputs = Array.from($app.querySelectorAll(".pa-amt"));
+    for (const input of inputs) {
+      if (!validateManualAmountInput(input)) return false;
+    }
+    return true;
+  }
+
   function payFootManual(d) {
     const amount = paySheet ? paySheet.amount : 0;
     const sum = Object.values(paySheet ? paySheet.alloc : {}).reduce((s, v) => s + (Number(v) || 0), 0);
@@ -1534,10 +1688,11 @@
     const date = (document.getElementById("f-pay-total-date") && document.getElementById("f-pay-total-date").value) || Calc.todayISO();
     let alloc;
     if (paySheet.mode === "manual") {
+      if (activeManualPayDialog || !validateAllManualAmounts()) return;
       alloc = {};
       let sum = 0;
       for (const [lid, v] of Object.entries(paySheet.alloc)) {
-        const pay = Math.min(Number(v) || 0, remById[lid] || 0);
+        const pay = Math.max(0, Math.floor(Number(v) || 0));
         if (pay > 0) { alloc[lid] = pay; sum += pay; }
       }
       if (sum <= 0) { toast("Belum ada nominal yang dialokasikan", "err"); return; }
@@ -1579,7 +1734,7 @@
       <div class="center" style="padding:6px 4px 10px">
         <img src="icons/icon-192.png" alt="" style="width:72px;height:72px;border-radius:20px;margin:0 auto 12px;box-shadow:var(--sh-md)">
         <h3 style="font-size:19px;font-weight:800;color:var(--ink)">PiutangKu</h3>
-        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.2</p>
+        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.3</p>
       </div>
       <p style="font-size:13.5px;color:var(--text);line-height:1.6;margin:6px 2px">
         Aplikasi sederhana untuk mencatat siapa yang masih berutang kepadamu dan berapa sisanya.
@@ -1999,6 +2154,11 @@
   ]);
 
   $app.addEventListener("click", async (e) => {
+    // Dialog validasi manual berada di atas sheet dan hanya menutup dirinya sendiri.
+    if (e.target.classList && e.target.classList.contains("manual-pay-confirm")) {
+      closeManualPayDialog({ selectInput: true });
+      return;
+    }
     // tutup sheet saat menyentuh latar
     if (e.target.classList && e.target.classList.contains("scrim")) { closeScrim(); return; }
 
@@ -2033,6 +2193,8 @@
       case "go": go(el.dataset.go); break;
       case "back": history.length > 1 ? history.back() : go("/"); break;
       case "close-sheet": closeScrim(); break;
+      case "pay-use-remaining": applyManualPayRemainder(); break;
+      case "pay-return-edit": closeManualPayDialog({ selectInput: true }); break;
 
       case "quick-add": openQuickAdd(); break;
       case "add-debtor": closeScrim(); openDebtorSheet(null); break;
@@ -2265,6 +2427,27 @@
     catch (error) { toast(userErrorMessage(error), "err"); }
   }
   $app.addEventListener("keydown", async (event) => {
+    const manualDialog = event.target.closest && event.target.closest(".manual-pay-confirm");
+    if (manualDialog) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeManualPayDialog({ selectInput: true });
+        return;
+      }
+      if (event.key === "Tab") {
+        const focusables = modalFocusables(manualDialog);
+        if (!focusables.length) { event.preventDefault(); return; }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault(); last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault(); first.focus();
+        }
+      }
+      return;
+    }
+
     const scrim = event.target.closest && event.target.closest(".scrim");
     if (scrim) {
       if (event.key === "Escape") {
@@ -2283,6 +2466,13 @@
           event.preventDefault(); first.focus();
         }
       }
+    }
+
+    const manualAmount = event.target.closest && event.target.closest(".pa-amt");
+    if (manualAmount && event.key === "Enter") {
+      event.preventDefault();
+      manualAmount.blur();
+      return;
     }
 
     const photoButton = event.target.closest && event.target.closest('.photo-box[role="button"]');
@@ -2332,12 +2522,20 @@
       if (paySheet.mode === "smart") refreshPayAlloc(d);
       else { const f = document.getElementById("pa-foot"); if (f) f.innerHTML = payFootManual(d); }
     } else if (paySheet && t.classList.contains("pa-amt")) {
-      let v = Calc.parseRupiah(t.value);
-      const max = Number(t.dataset.max) || 0;
-      if (v > max) { v = max; t.value = v ? v.toLocaleString("id-ID") : ""; }   // tak boleh lebihi sisa hutang
+      setManualAmountInvalid(t, false);
+      const v = Math.max(0, Math.floor(Calc.parseRupiah(t.value) || 0));
       const lid = t.dataset.loan;
       if (v > 0) paySheet.alloc[lid] = v; else delete paySheet.alloc[lid];
       const f = document.getElementById("pa-foot"); if (f) f.innerHTML = payFootManual(byId("debtors", paySheet.debtorId));
+    }
+  });
+
+  // Validasi dijalankan setelah pengguna selesai mengedit satu kolom, bukan pada
+  // setiap digit, agar pengetikan nominal besar tidak terganggu dialog berulang.
+  $app.addEventListener("change", (event) => {
+    const input = event.target;
+    if (paySheet && paySheet.mode === "manual" && input.classList && input.classList.contains("pa-amt")) {
+      validateManualAmountInput(input);
     }
   });
 
