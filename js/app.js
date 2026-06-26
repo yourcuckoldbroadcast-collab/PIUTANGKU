@@ -24,6 +24,9 @@
   let waitingWorker = null;
   let lastModalFocus = null;
   let modalSeq = 0;
+  let activeAttachmentViewer = null;
+  let lastAttachmentFocus = null;
+  let attachmentViewerSeq = 0;
 
   const MAX_MONEY = 1_000_000_000_000_000;
   const MAX_ATTACHMENTS = 8;
@@ -93,7 +96,7 @@
   }
 
   function rememberBackup() {
-    try { rememberBackup(); }
+    try { localStorage.setItem("piutangku:lastBackup", new Date().toISOString()); }
     catch (_) {}
   }
   function icon(id, size) {
@@ -635,8 +638,13 @@
         <div class="attach-row" style="margin-top:0">
           ${(l.attachments || []).map((a, i) => {
             const src = safeImageSrc(a.dataUrl);
-            return src ? `<div class="attach-thumb"><img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || "bukti")}">
-            <button class="x" data-act="del-attach" data-loan="${escapeAttr(l.id)}" data-idx="${i}" aria-label="Hapus lampiran ${i + 1}">${icon("ic-x")}</button></div>` : "";
+            return src ? `<div class="attach-thumb">
+              <button type="button" class="attach-preview" data-act="open-attachment" data-loan="${escapeAttr(l.id)}" data-idx="${i}" aria-label="Buka lampiran ${i + 1} dalam tampilan besar">
+                <img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || `Lampiran ${i + 1}`)}" loading="lazy">
+                <span class="attach-zoom-cue" aria-hidden="true">${icon("ic-search")}</span>
+              </button>
+              <button type="button" class="x" data-act="del-attach" data-loan="${escapeAttr(l.id)}" data-idx="${i}" aria-label="Hapus lampiran ${i + 1}">${icon("ic-x")}</button>
+            </div>` : "";
           }).join("")}
           <button class="attach-add" data-act="add-attach" data-loan="${l.id}" aria-label="Tambah bukti">${icon("ic-plus")}</button>
         </div>
@@ -951,6 +959,292 @@
   }
 
 
+  /* ---------------------------------------------------------
+     VIEWER LAMPIRAN — layar penuh, zoom, pinch, pan
+     --------------------------------------------------------- */
+  function closeAttachmentViewer({ restoreFocus = true } = {}) {
+    const current = activeAttachmentViewer;
+    if (!current) return;
+    activeAttachmentViewer = null;
+    current.cleanup();
+    current.root.classList.remove("show");
+    document.body.classList.remove("attachment-viewer-open");
+    setTimeout(() => current.root.remove(), 180);
+
+    const restore = lastAttachmentFocus;
+    lastAttachmentFocus = null;
+    if (restoreFocus && restore && restore.isConnected) {
+      setTimeout(() => restore.focus(), 200);
+    }
+  }
+
+  function openAttachmentViewer(value, name = "Lampiran") {
+    const src = safeImageSrc(value);
+    if (!src) { toast("Lampiran tidak dapat dibuka", "err"); return; }
+
+    if (activeAttachmentViewer) closeAttachmentViewer({ restoreFocus: false });
+    lastAttachmentFocus = document.activeElement;
+
+    const id = `attachment-viewer-${++attachmentViewerSeq}`;
+    const root = document.createElement("div");
+    root.className = "attachment-viewer";
+    root.setAttribute("role", "dialog");
+    root.setAttribute("aria-modal", "true");
+    root.setAttribute("aria-labelledby", `${id}-title`);
+    root.innerHTML = `
+      <header class="attachment-viewer__topbar">
+        <div class="attachment-viewer__heading">
+          <div class="attachment-viewer__title" id="${id}-title">${escapeHtml(name || "Lampiran")}</div>
+          <div class="attachment-viewer__hint">Cubit, gulir, atau ketuk dua kali untuk memperbesar</div>
+        </div>
+        <button type="button" class="attachment-viewer__close" data-viewer-act="close" aria-label="Tutup tampilan lampiran">${icon("ic-x")}</button>
+      </header>
+      <div class="attachment-viewer__stage" data-viewer-stage tabindex="0" aria-label="Area gambar lampiran">
+        <div class="attachment-viewer__loader" role="status">Membuka lampiran…</div>
+        <div class="attachment-viewer__pan">
+          <img class="attachment-viewer__image" src="${escapeAttr(src)}" alt="${escapeHtml(name || "Lampiran")}" draggable="false">
+        </div>
+      </div>
+      <div class="attachment-viewer__controls" role="group" aria-label="Kontrol pembesaran">
+        <button type="button" data-viewer-act="zoom-out" aria-label="Perkecil gambar">${icon("ic-minus-circle")}</button>
+        <button type="button" class="attachment-viewer__reset" data-viewer-act="reset" aria-label="Sesuaikan gambar ke layar">
+          <span data-viewer-percent aria-live="polite">—</span>
+          <small>Sesuaikan</small>
+        </button>
+        <button type="button" data-viewer-act="zoom-in" aria-label="Perbesar gambar">${icon("ic-plus-circle")}</button>
+      </div>`;
+
+    document.body.appendChild(root);
+    document.body.classList.add("attachment-viewer-open");
+
+    const stage = root.querySelector("[data-viewer-stage]");
+    const pan = root.querySelector(".attachment-viewer__pan");
+    const image = root.querySelector(".attachment-viewer__image");
+    const loader = root.querySelector(".attachment-viewer__loader");
+    const percent = root.querySelector("[data-viewer-percent]");
+    const zoomOut = root.querySelector('[data-viewer-act="zoom-out"]');
+    const zoomIn = root.querySelector('[data-viewer-act="zoom-in"]');
+    const pointers = new Map();
+
+    const view = {
+      root, stage, pan, image,
+      fitScale: 1, scale: 1, maxScale: 6,
+      x: 0, y: 0,
+      dragStart: null, pinchStart: null,
+      moved: false,
+      cleanup: () => {},
+    };
+    activeAttachmentViewer = view;
+
+    function constrain() {
+      if (!image.naturalWidth || !image.naturalHeight) return;
+      const rect = stage.getBoundingClientRect();
+      const width = image.naturalWidth * view.scale;
+      const height = image.naturalHeight * view.scale;
+      const maxX = Math.max(0, (width - rect.width) / 2 + 12);
+      const maxY = Math.max(0, (height - rect.height) / 2 + 12);
+      view.x = clamp(view.x, -maxX, maxX);
+      view.y = clamp(view.y, -maxY, maxY);
+      if (width <= rect.width) view.x = 0;
+      if (height <= rect.height) view.y = 0;
+    }
+
+    function applyTransform() {
+      constrain();
+      pan.style.setProperty("--viewer-x", `${view.x}px`);
+      pan.style.setProperty("--viewer-y", `${view.y}px`);
+      image.style.setProperty("--viewer-scale", String(view.scale));
+      percent.textContent = `${Math.round(view.scale * 100)}%`;
+      zoomOut.disabled = view.scale <= view.fitScale + 0.001;
+      zoomIn.disabled = view.scale >= view.maxScale - 0.001;
+      stage.classList.toggle("can-pan", view.scale > view.fitScale + 0.01);
+    }
+
+    function fitToStage() {
+      if (!image.naturalWidth || !image.naturalHeight) return;
+      const rect = stage.getBoundingClientRect();
+      const availableWidth = Math.max(1, rect.width - 28);
+      const availableHeight = Math.max(1, rect.height - 28);
+      const fit = Math.min(
+        availableWidth / image.naturalWidth,
+        availableHeight / image.naturalHeight
+      );
+      // Gambar kecil ikut dibesarkan, tetapi tidak sampai pecah berlebihan.
+      view.fitScale = clamp(fit, 0.05, 2);
+      view.maxScale = clamp(Math.max(view.fitScale * 5, 3), 3, 10);
+      view.scale = view.fitScale;
+      view.x = 0;
+      view.y = 0;
+      applyTransform();
+    }
+
+    function setScale(next, clientX, clientY) {
+      const old = view.scale;
+      const target = clamp(next, view.fitScale, view.maxScale);
+      if (Math.abs(target - old) < 0.0001) return;
+
+      if (Number.isFinite(clientX) && Number.isFinite(clientY)) {
+        const rect = stage.getBoundingClientRect();
+        const px = clientX - (rect.left + rect.width / 2);
+        const py = clientY - (rect.top + rect.height / 2);
+        const ratio = target / old;
+        view.x = px - (px - view.x) * ratio;
+        view.y = py - (py - view.y) * ratio;
+      }
+      view.scale = target;
+      applyTransform();
+    }
+
+    function distance(a, b) {
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    }
+
+    function onResize() {
+      const previousRatio = view.fitScale ? view.scale / view.fitScale : 1;
+      fitToStage();
+      if (previousRatio > 1.01) setScale(view.fitScale * previousRatio);
+    }
+
+    function onViewerClick(event) {
+      const action = event.target.closest("[data-viewer-act]");
+      if (action) {
+        const act = action.dataset.viewerAct;
+        if (act === "close") closeAttachmentViewer();
+        else if (act === "zoom-in") setScale(view.scale * 1.3);
+        else if (act === "zoom-out") setScale(view.scale / 1.3);
+        else if (act === "reset") fitToStage();
+        return;
+      }
+      if (event.target === stage && !view.moved) closeAttachmentViewer();
+      view.moved = false;
+    }
+
+    function onKeydown(event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeAttachmentViewer();
+        return;
+      }
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault(); setScale(view.scale * 1.3); return;
+      }
+      if (event.key === "-" || event.key === "_") {
+        event.preventDefault(); setScale(view.scale / 1.3); return;
+      }
+      if (event.key === "0") {
+        event.preventDefault(); fitToStage(); return;
+      }
+      if (event.key === "Tab") {
+        const focusables = modalFocusables(root);
+        if (!focusables.length) { event.preventDefault(); return; }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault(); last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault(); first.focus();
+        }
+      }
+    }
+
+    function onWheel(event) {
+      event.preventDefault();
+      const factor = event.deltaY < 0 ? 1.16 : 1 / 1.16;
+      setScale(view.scale * factor, event.clientX, event.clientY);
+    }
+
+    function onDoubleClick(event) {
+      event.preventDefault();
+      if (view.scale > view.fitScale * 1.15) fitToStage();
+      else setScale(Math.min(view.maxScale, Math.max(1, view.fitScale * 2.25)), event.clientX, event.clientY);
+    }
+
+    function onPointerDown(event) {
+      if (event.button != null && event.button !== 0) return;
+      stage.setPointerCapture?.(event.pointerId);
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      view.moved = false;
+
+      if (pointers.size === 1) {
+        view.dragStart = { pointerX: event.clientX, pointerY: event.clientY, x: view.x, y: view.y };
+        view.pinchStart = null;
+      } else if (pointers.size === 2) {
+        const [a, b] = Array.from(pointers.values());
+        view.pinchStart = { distance: distance(a, b), scale: view.scale };
+        view.dragStart = null;
+      }
+    }
+
+    function onPointerMove(event) {
+      if (!pointers.has(event.pointerId)) return;
+      const previous = pointers.get(event.pointerId);
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (Math.hypot(event.clientX - previous.x, event.clientY - previous.y) > 1) view.moved = true;
+
+      if (pointers.size >= 2 && view.pinchStart) {
+        const [a, b] = Array.from(pointers.values());
+        const startDistance = Math.max(1, view.pinchStart.distance);
+        setScale(view.pinchStart.scale * distance(a, b) / startDistance, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      } else if (pointers.size === 1 && view.dragStart && view.scale > view.fitScale + 0.01) {
+        view.x = view.dragStart.x + event.clientX - view.dragStart.pointerX;
+        view.y = view.dragStart.y + event.clientY - view.dragStart.pointerY;
+        applyTransform();
+      }
+    }
+
+    function onPointerEnd(event) {
+      pointers.delete(event.pointerId);
+      if (pointers.size === 1) {
+        const remaining = Array.from(pointers.values())[0];
+        view.dragStart = { pointerX: remaining.x, pointerY: remaining.y, x: view.x, y: view.y };
+        view.pinchStart = null;
+      } else if (!pointers.size) {
+        view.dragStart = null;
+        view.pinchStart = null;
+      }
+    }
+
+    root.addEventListener("click", onViewerClick);
+    root.addEventListener("keydown", onKeydown);
+    stage.addEventListener("wheel", onWheel, { passive: false });
+    stage.addEventListener("dblclick", onDoubleClick);
+    stage.addEventListener("pointerdown", onPointerDown);
+    stage.addEventListener("pointermove", onPointerMove);
+    stage.addEventListener("pointerup", onPointerEnd);
+    stage.addEventListener("pointercancel", onPointerEnd);
+    window.addEventListener("resize", onResize);
+
+    view.cleanup = () => {
+      root.removeEventListener("click", onViewerClick);
+      root.removeEventListener("keydown", onKeydown);
+      stage.removeEventListener("wheel", onWheel);
+      stage.removeEventListener("dblclick", onDoubleClick);
+      stage.removeEventListener("pointerdown", onPointerDown);
+      stage.removeEventListener("pointermove", onPointerMove);
+      stage.removeEventListener("pointerup", onPointerEnd);
+      stage.removeEventListener("pointercancel", onPointerEnd);
+      window.removeEventListener("resize", onResize);
+    };
+
+    const finishLoad = () => {
+      loader.hidden = true;
+      image.classList.add("ready");
+      fitToStage();
+    };
+    if (image.complete && image.naturalWidth) finishLoad();
+    else image.addEventListener("load", finishLoad, { once: true });
+    image.addEventListener("error", () => {
+      loader.textContent = "Lampiran gagal dibuka.";
+      loader.classList.add("error");
+    }, { once: true });
+
+    requestAnimationFrame(() => {
+      root.classList.add("show");
+      root.querySelector('[data-viewer-act="close"]')?.focus();
+    });
+  }
+
+
   const TAGS = ["Tetangga", "Keluarga", "Teman", "Pelanggan", "Warung", "UMKM", "Lainnya"];
 
   // isi bingkai foto (kotak + tombol hapus); dipakai ulang saat refresh
@@ -1048,8 +1342,13 @@
   function attachThumbs() {
     return sheetAttachments.map((a, i) => {
       const src = safeImageSrc(a.dataUrl);
-      return src ? `<div class="attach-thumb"><img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || `Lampiran ${i + 1}`)}">
-      <button class="x" data-act="sheet-attach-del" data-idx="${i}" aria-label="Hapus lampiran ${i + 1}">${icon("ic-x")}</button></div>` : "";
+      return src ? `<div class="attach-thumb">
+        <button type="button" class="attach-preview" data-act="open-sheet-attachment" data-idx="${i}" aria-label="Buka lampiran ${i + 1} dalam tampilan besar">
+          <img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || `Lampiran ${i + 1}`)}">
+          <span class="attach-zoom-cue" aria-hidden="true">${icon("ic-search")}</span>
+        </button>
+        <button type="button" class="x" data-act="sheet-attach-del" data-idx="${i}" aria-label="Hapus lampiran ${i + 1}">${icon("ic-x")}</button>
+      </div>` : "";
     }).join("");
   }
   function openAddLoan(debtorId) {
@@ -1280,7 +1579,7 @@
       <div class="center" style="padding:6px 4px 10px">
         <img src="icons/icon-192.png" alt="" style="width:72px;height:72px;border-radius:20px;margin:0 auto 12px;box-shadow:var(--sh-md)">
         <h3 style="font-size:19px;font-weight:800;color:var(--ink)">PiutangKu</h3>
-        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.1</p>
+        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.2</p>
       </div>
       <p style="font-size:13.5px;color:var(--text);line-height:1.6;margin:6px 2px">
         Aplikasi sederhana untuk mencatat siapa yang masih berutang kepadamu dan berapa sisanya.
@@ -1828,6 +2127,19 @@
       case "save-loan": await saveLoan(id); break;
       case "create-payment": await createPayment(loanId); break;
 
+      case "open-attachment": {
+        const loan = byId("loans", loanId);
+        const attachment = loan && Array.isArray(loan.attachments) ? loan.attachments[Number(el.dataset.idx)] : null;
+        if (attachment) openAttachmentViewer(attachment.dataUrl, attachment.name || "Bukti pembayaran");
+        else toast("Lampiran tidak ditemukan", "err");
+        break;
+      }
+      case "open-sheet-attachment": {
+        const attachment = sheetAttachments[Number(el.dataset.idx)];
+        if (attachment) openAttachmentViewer(attachment.dataUrl, attachment.name || "Bukti pembayaran");
+        else toast("Lampiran tidak ditemukan", "err");
+        break;
+      }
       case "sheet-attach": sheetAddAttachment(); break;
       case "sheet-attach-del": sheetAttachments.splice(Number(el.dataset.idx), 1); {
         const host = document.getElementById("f-attach");
