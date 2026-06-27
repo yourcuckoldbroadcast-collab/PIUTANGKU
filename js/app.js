@@ -1010,15 +1010,31 @@
   function manualReallocationSources(targetLoanId) {
     if (!paySheet) return [];
     const debtor = byId("debtors", paySheet.debtorId);
-    const names = new Map(payActiveLoans(debtor).map((item) => [item.id, item.description]));
+    const smartOrder = payActiveLoans(debtor);
+    const meta = new Map(smartOrder.map((item, index) => [item.id, {
+      name: item.description,
+      order: index,
+    }]));
+
+    // Reverse-SmartPay: sumber yang terakhir menerima alokasi SmartPay
+    // ditampilkan lebih dulu. Biasanya ini adalah hutang parsial terakhir,
+    // kemudian mundur ke hutang lunas sebelumnya.
     return Object.entries(paySheet.alloc || {})
-      .map(([id, value]) => ({
-        id,
-        name: names.get(id) || "Hutang",
-        allocated: Math.max(0, Math.floor(Number(value) || 0)),
-      }))
+      .map(([id, value]) => {
+        const itemMeta = meta.get(id) || {};
+        return {
+          id,
+          name: itemMeta.name || "Hutang",
+          smartOrder: Number.isInteger(itemMeta.order) ? itemMeta.order : -1,
+          allocated: Math.max(0, Math.floor(Number(value) || 0)),
+        };
+      })
       .filter((item) => item.id !== targetLoanId && item.allocated > 0)
-      .sort((a, b) => b.allocated - a.allocated || a.name.localeCompare(b.name, "id"));
+      .sort((a, b) =>
+        (b.smartOrder - a.smartOrder) ||
+        (b.allocated - a.allocated) ||
+        a.name.localeCompare(b.name, "id")
+      );
   }
 
   function renderManualReallocationPrompt(current) {
@@ -1039,6 +1055,23 @@
     return Object.values(current.reductions || {}).reduce(
       (sum, value) => sum + Math.max(0, Math.floor(Number(value) || 0)), 0
     );
+  }
+
+  function defaultReverseReallocation(sources, needed) {
+    let left = Math.max(0, Math.floor(Number(needed) || 0));
+    const reductions = {};
+    for (const source of sources || []) {
+      if (left <= 0) break;
+      const allocated = Math.max(0, Math.floor(Number(source.allocated) || 0));
+      const take = Math.min(allocated, left);
+      if (take > 0) reductions[source.id] = take;
+      left -= take;
+    }
+    return {
+      reductions,
+      selected: Math.max(0, Math.floor(Number(needed) || 0)) - left,
+      missing: left,
+    };
   }
 
   function renderManualReallocationEditor(current) {
@@ -1145,6 +1178,8 @@
     const baseAlloc = Object.assign({}, paySheet.alloc || {});
     if (decision.previous > 0) baseAlloc[loanId] = decision.previous;
     else delete baseAlloc[loanId];
+    const sources = manualReallocationSources(loanId);
+    const defaultPlan = defaultReverseReallocation(sources, decision.needed);
     activeManualPayDialog = {
       root,
       dialogId: id,
@@ -1156,8 +1191,11 @@
       unallocated: decision.unallocated,
       needed: decision.needed,
       baseAlloc,
-      sources: manualReallocationSources(loanId),
-      reductions: {},
+      sources,
+      // Isian awal mengikuti SmartPay secara terbalik: tarik dari alokasi
+      // terakhir/parsial, lalu mundur sampai kebutuhan realokasi terpenuhi.
+      // Pengguna tetap bebas mengubah semua nominal sebelum menerapkan.
+      reductions: defaultPlan.reductions,
       stage: "prompt",
     };
     renderManualReallocationPrompt(activeManualPayDialog);
@@ -1804,6 +1842,12 @@
   function validateManualAllocationState(alloc, total, remainingById) {
     const sourceTotal = Math.max(0, Math.floor(Number(total) || 0));
     const limits = remainingById && typeof remainingById === "object" ? remainingById : {};
+    const debtCapacity = Object.values(limits).reduce(
+      (sum, value) => sum + Math.max(0, Math.floor(Number(value) || 0)), 0
+    );
+    // Bila sumber pembayaran lebih besar daripada seluruh hutang aktif,
+    // bagian yang tidak mungkin dialokasikan tetap sah sebagai leftover.
+    const expected = Math.min(sourceTotal, debtCapacity);
     let sum = 0;
 
     for (const [loanId, rawAmount] of Object.entries(alloc || {})) {
@@ -1822,12 +1866,23 @@
       }
 
       sum += amount;
-      if (sum > sourceTotal) {
-        return { ok: false, type: "over-sum", sum, max: sourceTotal };
+      if (sum > expected) {
+        return { ok: false, type: "over-sum", sum, max: expected };
       }
     }
 
-    return { ok: true, sum, max: sourceTotal };
+    if (sum < expected) {
+      return {
+        ok: false,
+        type: "under-sum",
+        sum,
+        max: expected,
+        expected,
+        missing: expected - sum,
+      };
+    }
+
+    return { ok: true, sum, max: expected, expected };
   }
 
   function restoreRejectedManualInput(input, previous) {
@@ -1901,11 +1956,19 @@
   }
 
   function payFootManual(d, previewSum = null) {
-    const amount = paySheet ? paySheet.amount : 0;
+    const amount = paySheet ? Math.max(0, Math.floor(Number(paySheet.amount) || 0)) : 0;
     const committed = Object.values(paySheet ? paySheet.alloc : {}).reduce((s, v) => s + (Number(v) || 0), 0);
     const sum = previewSum == null ? committed : Math.max(0, Math.floor(Number(previewSum) || 0));
-    const over = amount > 0 && sum > amount;
-    return `<span>Total dialokasikan</span><span class="tnum${over ? " over" : ""}">${rupiah(sum)}${amount > 0 ? ` / ${rupiah(amount)}` : ""}</span>`;
+    const debtCapacity = d ? payActiveLoans(d).reduce((total, item) => total + item.remaining, 0) : amount;
+    const expected = Math.min(amount, debtCapacity);
+    const mismatch = expected > 0 && sum !== expected;
+    const balance = expected - sum;
+    const detail = balance > 0
+      ? ` · kurang ${rupiah(balance)}`
+      : balance < 0
+        ? ` · lebih ${rupiah(Math.abs(balance))}`
+        : "";
+    return `<span>Total dialokasikan</span><span class="tnum${mismatch ? " over" : ""}">${rupiah(sum)}${expected > 0 ? ` / ${rupiah(expected)}` : ""}${detail}</span>`;
   }
   function payAllocInner(d) {
     const items = payActiveLoans(d);
@@ -2013,7 +2076,9 @@
         } else if (guard.type === "over-debt") {
           toast(`Nominal input melebihi sisa hutang. Masukkan nominal maksimal ${rupiah(guard.max)}.`, "err");
         } else if (guard.type === "over-sum") {
-          toast(`Total alokasi melebihi nominal pembayaran SmartPay ${rupiah(guard.max)}.`, "err");
+          toast(`Total alokasi melebihi batas pembayaran ${rupiah(guard.max)}.`, "err");
+        } else if (guard.type === "under-sum") {
+          toast(`Total alokasi masih kurang ${rupiah(guard.missing)}. Lengkapi pembagian hingga ${rupiah(guard.expected)}.`, "err");
         } else {
           toast("Alokasi memuat hutang yang tidak lagi aktif. Muat ulang pembayaran.", "err");
         }
