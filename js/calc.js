@@ -201,73 +201,196 @@ const Calc = (() => {
     };
   }
 
-  // ---------- Indikator Aktivitas Pembayaran ----------
-  // Heuristik aktivitas 0–100, bukan penilaian kelayakan kredit.
-  // Nilai turun bila pinjaman lama tidak memiliki aktivitas pembayaran dan
-  // disesuaikan dengan durasi penyelesaian pinjaman yang sudah lunas.
-  function trustScore(debtor, loans, payments, now = Date.now()) {
-    const dl = loans.filter((l) => l.debtorId === debtor.id);
-    if (dl.length === 0) {
-      return { score: null, category: "baru", label: "Baru", emoji: "⚪", color: "ghost", reason: "Belum ada riwayat pinjaman." };
-    }
-    let score = 100;
-    const durations = [];
-    const reasons = [];
-    let idleCount = 0;
-
-    dl.forEach((loan) => {
-      const sm = loanSummary(loan, payments);
-      if (sm.lunas) {
-        const lastPay = sm.payments.length ? new Date(sm.payments[sm.payments.length - 1].date).getTime() : new Date(loan.date).getTime();
-        durations.push(Math.max(0, Math.round((lastPay - new Date(loan.date).getTime()) / DAY)));
-      } else {
-        const lastPay = sm.payments.length ? new Date(sm.payments[sm.payments.length - 1].date).getTime() : new Date(loan.date).getTime();
-        const idle = Math.round((now - lastPay) / DAY);
-        if (idle > 90) { score -= 25; idleCount++; }
-        else if (idle > 60) { score -= 15; idleCount++; }
-        else if (idle > 30) { score -= 7; }
-      }
-    });
-
-    if (durations.length) {
-      const avg = durations.reduce((a, b) => a + b, 0) / durations.length;
-      if (avg > 90) { score -= 15; reasons.push("rata-rata pelunasan lambat"); }
-      else if (avg > 60) { score -= 10; reasons.push("pelunasan agak lambat"); }
-      else if (avg > 30) { score -= 5; }
-      else { score += 3; reasons.push("pelunasan cepat"); }
-    }
-    if (idleCount) reasons.push(`${idleCount} pinjaman lama tanpa aktivitas`);
-
-    score = Math.max(0, Math.min(100, Math.round(score)));
-
-    let category, label, emoji, color;
-    if (score >= 80) { category = "aktif"; label = "Aktivitas Baik"; emoji = "🟢"; color = "green"; }
-    else if (score >= 60) { category = "pantau"; label = "Perlu Dipantau"; emoji = "🟡"; color = "yellow"; }
-    else { category = "lama"; label = "Lama Tanpa Aktivitas"; emoji = "🔴"; color = "red"; }
-
-    return { score, category, label, emoji, color, reason: reasons.length ? reasons.join(", ") : "Aktivitas pembayaran tercatat baik." };
+  // ---------- Profil Pembayaran Debitur ----------
+  // Indikator perilaku pembayaran 0–100. Bukan skor kredit dan tidak memakai
+  // istilah "terlambat" karena data PiutangKu belum memiliki tanggal jatuh tempo.
+  //
+  // Prinsip:
+  // - Pelunasan, aktivitas, dan kecepatan dinormalisasi secara terpisah.
+  // - Geometric mean mengurangi kemampuan satu indikator bagus menutupi indikator
+  //   yang sangat buruk.
+  // - Skor ditarik ke nilai netral 50 ketika histori masih sedikit (confidence
+  //   shrinkage), sehingga satu transaksi tidak langsung menghasilkan 0/100.
+  // - Hutang aktif yang sangat lama tanpa aktivitas diberi hard gate.
+  function median(values) {
+    const list = (values || []).filter(Number.isFinite).slice().sort((a, b) => a - b);
+    if (!list.length) return null;
+    const middle = Math.floor(list.length / 2);
+    return list.length % 2 ? list[middle] : (list[middle - 1] + list[middle]) / 2;
   }
 
-  // ---------- Pengingat ----------
-  // Debitur yang masih punya sisa & sudah lama tidak ada pembayaran.
-  function reminders(debtors, loans, payments, now = Date.now(), idleThreshold = 45) {
-    const out = [];
-    debtors.forEach((d) => {
-      const sm = debtorSummary(d, loans, payments);
-      if (!sm.hasDebt || sm.lastActivity == null) return;
-      const days = Math.floor((now - sm.lastActivity) / DAY);
-      if (days >= idleThreshold) {
-        out.push({
-          debtorId: d.id,
-          name: d.name,
-          days,
-          remaining: sm.remaining,
-          message: `Belum ada pembayaran selama ${days} hari`,
-          severity: days >= 90 ? "high" : "mid",
-        });
-      }
+  function clampScore(value) { return Math.max(0, Math.min(100, Number(value) || 0)); }
+
+  function durationScore(days) {
+    const d = Math.max(0, Number(days) || 0);
+    if (d <= 30) return 100;
+    if (d <= 60) return 100 - ((d - 30) / 30) * 15;
+    if (d <= 90) return 85 - ((d - 60) / 30) * 15;
+    if (d <= 180) return 70 - ((d - 90) / 90) * 30;
+    if (d <= 365) return 40 - ((d - 180) / 185) * 25;
+    return Math.max(5, 15 - ((d - 365) / 365) * 10);
+  }
+
+  function trustScore(debtor, loans, payments, now = Date.now()) {
+    const dl = (loans || []).filter((loan) => loan.debtorId === debtor.id);
+    if (!dl.length) {
+      return {
+        score: null, category: "baru", label: "Baru", emoji: "⚪", color: "ghost",
+        confidence: "none", confidenceLabel: "Belum ada data",
+        reason: "Belum ada riwayat pinjaman.",
+        breakdown: { pelunasan: 50, aktivitas: 50, kecepatan: 50 },
+      };
+    }
+
+    const summaries = dl.map((loan) => ({ loan, summary: loanSummary(loan, payments || []) }));
+    const totalBorrowed = summaries.reduce((sum, item) => sum + Math.max(0, Number(item.loan.amount) || 0), 0);
+    const totalPaid = summaries.reduce((sum, item) => sum + item.summary.paid, 0);
+    const settled = summaries.filter((item) => item.summary.lunas);
+    const active = summaries.filter((item) => !item.summary.lunas && item.summary.remaining > 0);
+    const paymentCount = summaries.reduce((sum, item) => sum + item.summary.paymentCount, 0);
+
+    const progressScore = totalBorrowed > 0 ? (totalPaid / totalBorrowed) * 100 : 50;
+    const settledRatio = dl.length ? (settled.length / dl.length) * 100 : 50;
+    const pelunasan = Math.round(clampScore(progressScore * 0.78 + settledRatio * 0.22));
+
+    let oldestIdleDays = 0;
+    let aktivitas = 100;
+    if (active.length) {
+      let weightedRecency = 0;
+      let remainingWeight = 0;
+      active.forEach(({ loan, summary }) => {
+        const last = summary.payments.length
+          ? toTime(summary.payments[summary.payments.length - 1].date)
+          : toTime(loan.date);
+        const idle = Math.max(0, Math.floor((now - last) / DAY));
+        oldestIdleDays = Math.max(oldestIdleDays, idle);
+        const weight = Math.max(1, summary.remaining);
+        const recency = 100 * Math.exp(-0.015 * idle);
+        weightedRecency += recency * weight;
+        remainingWeight += weight;
+      });
+      const recencyScore = remainingWeight ? weightedRecency / remainingWeight : 50;
+      const firstLoanTimes = dl.map((loan) => toTime(loan.date)).filter(Boolean);
+      const firstLoanTime = firstLoanTimes.length ? Math.min(...firstLoanTimes) : now;
+      const activeMonths = Math.max(1, (now - firstLoanTime) / (30 * DAY));
+      const frequencyScore = clampScore((paymentCount / activeMonths) * 100);
+      aktivitas = Math.round(clampScore(recencyScore * 0.72 + frequencyScore * 0.28));
+    }
+
+    const settlementDurations = settled.map(({ loan, summary }) => {
+      const end = summary.payments.length
+        ? toTime(summary.payments[summary.payments.length - 1].date)
+        : toTime(loan.date);
+      return Math.max(0, Math.round((end - toTime(loan.date)) / DAY));
     });
-    return out.sort((a, b) => b.days - a.days);
+    const medianDuration = median(settlementDurations);
+    const kecepatan = Math.round(clampScore(medianDuration == null ? 50 : durationScore(medianDuration)));
+
+    const FLOOR = 1;
+    const geoMean = Math.pow(
+      Math.max(pelunasan, FLOOR) * Math.max(aktivitas, FLOOR) * Math.max(kecepatan, FLOOR),
+      1 / 3
+    );
+    const weightedAverage = pelunasan * 0.45 + aktivitas * 0.25 + kecepatan * 0.30;
+    const rawScore = geoMean * 0.65 + weightedAverage * 0.35;
+
+    const evidenceUnits = paymentCount + settled.length * 2 + Math.min(2, dl.length * 0.5);
+    const evidence = Math.min(1, evidenceUnits / 10);
+    let score = 50 + evidence * (rawScore - 50);
+
+    let gate = "none";
+    if (active.length && oldestIdleDays > 180) {
+      score = Math.min(score, 30);
+      gate = "very-idle";
+    } else if (active.length && oldestIdleDays > 90) {
+      score = Math.min(score, 45);
+      gate = "idle";
+    }
+    score = Math.round(Math.max(1, Math.min(100, score)));
+
+    let category, label, emoji, color;
+    if (score >= 80) { category = "sangat-baik"; label = "Sangat Baik"; emoji = "🟢"; color = "green"; }
+    else if (score >= 65) { category = "baik"; label = "Baik"; emoji = "🟢"; color = "green"; }
+    else if (score >= 50) { category = "cukup"; label = "Cukup"; emoji = "🟡"; color = "yellow"; }
+    else if (score >= 35) { category = "pantau"; label = "Perlu Pengawasan"; emoji = "🟡"; color = "yellow"; }
+    else { category = "risiko"; label = "Risiko Aktivitas Tinggi"; emoji = "🔴"; color = "red"; }
+
+    let confidence, confidenceLabel;
+    if (evidence < 0.35) { confidence = "low"; confidenceLabel = "Data terbatas"; }
+    else if (evidence < 0.75) { confidence = "medium"; confidenceLabel = "Data sedang"; }
+    else { confidence = "high"; confidenceLabel = "Data kuat"; }
+
+    const reasons = [];
+    if (gate === "very-idle") reasons.push("hutang aktif tanpa aktivitas lebih dari 180 hari");
+    else if (gate === "idle") reasons.push("hutang aktif tanpa aktivitas lebih dari 90 hari");
+    if (settled.length) reasons.push(`median pelunasan ${Math.round(medianDuration)} hari`);
+    else reasons.push("belum ada pinjaman yang selesai");
+    reasons.push(confidenceLabel.toLowerCase());
+
+    return {
+      score, category, label, emoji, color, confidence, confidenceLabel,
+      reason: reasons.join(" · "),
+      breakdown: {
+        pelunasan, aktivitas, kecepatan,
+        geometricMean: Math.round(geoMean),
+        weightedAverage: Math.round(weightedAverage),
+        evidence: Math.round(evidence * 100),
+        gate,
+      },
+    };
+  }
+
+  // ---------- Pengingat Fleksibel ----------
+  // Satu debitur hanya memiliki satu kebijakan pengingat. Pilihan manual
+  // menggantikan threshold otomatis, sehingga tidak ada dua reminder bertabrakan.
+  function reminderConfig(debtor) {
+    const mode = debtor && ["auto", "custom", "off"].includes(debtor.reminderMode)
+      ? debtor.reminderMode : "auto";
+    if (mode === "off") return { mode, enabled: false, days: 0, label: "Nonaktif" };
+    const rawDays = mode === "auto" ? 45 : Number(debtor.reminderDays);
+    const days = Number.isInteger(rawDays) && rawDays >= 1 && rawDays <= 3650 ? rawDays : (mode === "auto" ? 45 : 30);
+    return { mode, enabled: true, days, label: mode === "auto" ? "Otomatis 45 hari" : `${days} hari` };
+  }
+
+  function reminderStatus(debtor, loans, payments, now = Date.now()) {
+    const config = reminderConfig(debtor);
+    const summary = debtorSummary(debtor, loans || [], payments || []);
+    if (!config.enabled || !summary.hasDebt || summary.lastActivity == null) return null;
+
+    const activityDueAt = summary.lastActivity + config.days * DAY;
+    const nextAt = toTime(debtor.reminderNextAt);
+    const snoozedUntil = toTime(debtor.reminderSnoozedUntil);
+    const dueAt = Math.max(activityDueAt, nextAt || 0, snoozedUntil || 0);
+    const days = Math.max(0, Math.floor((now - summary.lastActivity) / DAY));
+    const overdueDays = Math.max(0, Math.floor((now - dueAt) / DAY));
+    const due = now >= dueAt;
+
+    return {
+      debtorId: debtor.id,
+      name: debtor.name,
+      remaining: summary.remaining,
+      days,
+      due,
+      dueAt,
+      overdueDays,
+      reminderDays: config.days,
+      mode: config.mode,
+      message: due
+        ? `${days} hari tanpa aktivitas · pengingat ${config.days} hari`
+        : `Pengingat berikutnya ${tanggal(dateToLocalISO(new Date(dueAt)), "long")}`,
+      severity: overdueDays >= 30 || days >= config.days * 2 ? "high" : "mid",
+    };
+  }
+
+  function reminders(debtors, loans, payments, now = Date.now()) {
+    const out = [];
+    (debtors || []).forEach((debtor) => {
+      const status = reminderStatus(debtor, loans, payments, now);
+      if (status && status.due) out.push(status);
+    });
+    return out.sort((a, b) =>
+      (b.overdueDays - a.overdueDays) || (b.remaining - a.remaining) || String(a.name).localeCompare(String(b.name))
+    );
   }
 
   // ---------- Validasi & normalisasi import ----------
@@ -345,6 +468,18 @@ const Calc = (() => {
       const createdAt = cleanCreatedAt(source.createdAt, todayISO());
       if (!createdAt) return failImport(`Tanggal pembuatan debitur “${name}” tidak valid.`);
       const normalized = { id, name, phone, tag, note, photo: photo.value, createdAt };
+      const reminderMode = ["auto", "custom", "off"].includes(source.reminderMode) ? source.reminderMode : "auto";
+      const reminderDaysRaw = Number(source.reminderDays);
+      const reminderDays = Number.isInteger(reminderDaysRaw) && reminderDaysRaw >= 1 && reminderDaysRaw <= 3650
+        ? reminderDaysRaw : (reminderMode === "custom" ? 30 : 45);
+      normalized.reminderMode = reminderMode;
+      if (reminderMode === "custom") normalized.reminderDays = reminderDays;
+      const reminderNextAt = source.reminderNextAt ? cleanCreatedAt(source.reminderNextAt, "") : "";
+      const reminderSnoozedUntil = source.reminderSnoozedUntil ? cleanCreatedAt(source.reminderSnoozedUntil, "") : "";
+      if (source.reminderNextAt && !reminderNextAt) return failImport(`Jadwal pengingat debitur “${name}” tidak valid.`);
+      if (source.reminderSnoozedUntil && !reminderSnoozedUntil) return failImport(`Waktu tunda pengingat debitur “${name}” tidak valid.`);
+      if (reminderNextAt) normalized.reminderNextAt = reminderNextAt;
+      if (reminderSnoozedUntil) normalized.reminderSnoozedUntil = reminderSnoozedUntil;
       const emoji = cleanText(source.emoji, 8);
       const color = typeof source.color === "string" && /^#[0-9A-Fa-f]{6}$/.test(source.color) ? source.color : "";
       if (emoji) normalized.emoji = emoji;
@@ -499,7 +634,7 @@ const Calc = (() => {
     uid, rupiah, rupiahShort, parseRupiah, tanggal, todayISO, waktuRelatif, pct,
     avatarColor, initials,
     loanSummary, debtorSummary, globalSummary, smartAllocate,
-    trustScore, reminders, validateImport, sampleData, dateToLocalISO, BACKUP_VERSION,
+    trustScore, reminderConfig, reminderStatus, reminders, validateImport, sampleData, dateToLocalISO, BACKUP_VERSION,
   };
 })();
 

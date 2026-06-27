@@ -390,6 +390,7 @@
             <div class="profile-meta">
               ${d.tag ? `<span class="profile-contact">${icon("ic-tag")} ${escapeHtml(d.tag)}</span>` : ""}
               ${d.phone ? `<a class="profile-contact" href="tel:${encodeURIComponent(d.phone)}">${icon("ic-phone")} ${escapeHtml(d.phone)}</a>` : ""}
+              ${Calc.reminderConfig(d).enabled ? `<span class="profile-contact">${icon("ic-bell")} Pengingat ${escapeHtml(Calc.reminderConfig(d).label.toLowerCase())}</span>` : `<span class="profile-contact muted">${icon("ic-bell")} Pengingat nonaktif</span>`}
             </div>
           </div>
         </div>
@@ -434,15 +435,21 @@
       return `<div class="trust">
         <div class="trust-top">
           <div class="trust-gauge">${Charts.gauge(0, "var(--lav-300)")}<div class="gnum">–</div></div>
-          <div class="trust-info"><div class="tlabel">Indikator Pembayaran</div>
-            <div class="trust-cat"><span style="color:var(--lav-700)">⚪ Baru</span></div></div>
+          <div class="trust-info"><div class="tlabel">Profil Pembayaran</div>
+            <div class="trust-cat"><span style="color:var(--lav-700)">⚪ Baru</span></div>
+            <span class="trust-confidence none">Belum ada data</span></div>
         </div>
         <div class="trust-hint">${escapeHtml(ts.reason)}</div>
       </div>`;
     }
     const colorMap = { green: "var(--pos)", yellow: "var(--warn)", red: "var(--due)" };
     const col = colorMap[ts.color] || "var(--mint-500)";
-    const bars = trustBars(d).map((b) =>
+    const breakdown = ts.breakdown || {};
+    const bars = [
+      { label: "Pelunasan", val: breakdown.pelunasan || 0, color: "var(--mint-500)" },
+      { label: "Aktivitas", val: breakdown.aktivitas || 0, color: "var(--lav-500)" },
+      { label: "Kecepatan", val: breakdown.kecepatan || 0, color: "var(--orange-500)" },
+    ].map((b) =>
       `<div class="tbar-row"><span class="tbar-label">${b.label}</span>
         <span class="tbar-track"><span class="tbar-fill" style="width:${b.val}%;background:${b.color}"></span></span>
         <span class="tbar-val">${b.val}</span></div>`).join("");
@@ -450,51 +457,16 @@
       <div class="trust-top">
         <div class="trust-gauge">${Charts.gauge(ts.score, col)}<div class="gnum">${ts.score}</div></div>
         <div class="trust-info">
-          <div class="tlabel">Indikator Pembayaran</div>
-          <div class="trust-cat"><span>${ts.emoji}</span><span style="color:${col}">${ts.label}</span></div>
+          <div class="tlabel">Profil Pembayaran</div>
+          <div class="trust-cat"><span>${ts.emoji}</span><span style="color:${col}">${escapeHtml(ts.label)}</span></div>
+          <span class="trust-confidence ${escapeAttr(ts.confidence || "low")}">${escapeHtml(ts.confidenceLabel || "Data terbatas")}</span>
         </div>
       </div>
       <div class="trust-bars">${bars}</div>
-      <div class="trust-hint">${icon("ic-info", 12)} ${escapeHtml(cap(ts.reason))}<br>Indikator ini membaca aktivitas pembayaran, bukan kelayakan kredit atau tanggal jatuh tempo.</div>
+      <div class="trust-hint">${icon("ic-info", 12)} ${escapeHtml(cap(ts.reason))}<br>Profil ini membaca histori pembayaran dan kekuatan datanya, bukan kelayakan kredit atau keterlambatan terhadap jatuh tempo.</div>
     </div>`;
   }
-  function cap(s) { s = String(s || ""); return s.charAt(0).toUpperCase() + s.slice(1); }
-
-  function trustBars(d) {
-    const s = Calc.debtorSummary(d, state.loans, state.payments);
-    const active = s.loans.filter((l) => !Calc.loanSummary(l, state.payments).lunas);
-    const settled = s.loans.filter((l) => Calc.loanSummary(l, state.payments).lunas);
-    const lastT = (l, ls) => ls.payments.length ? new Date(ls.payments[ls.payments.length - 1].date).getTime() : new Date(l.date).getTime();
-
-    const repay = s.totalBorrowed > 0 ? s.percent : 0;
-
-    let punct = 100;
-    if (active.length) {
-      let oldest = 0;
-      active.forEach((l) => {
-        const ls = Calc.loanSummary(l, state.payments);
-        const idle = Math.floor((Date.now() - lastT(l, ls)) / DAY);
-        if (idle > oldest) oldest = idle;
-      });
-      punct = Math.round(100 * clamp(1 - Math.max(0, oldest - 30) / 90, 0, 1));
-    }
-
-    let speed;
-    if (!settled.length) speed = active.length ? 50 : 100;
-    else {
-      let total = 0;
-      settled.forEach((l) => {
-        const ls = Calc.loanSummary(l, state.payments);
-        total += Math.max(0, Math.round((lastT(l, ls) - new Date(l.date).getTime()) / DAY));
-      });
-      speed = Math.round(100 * clamp(1 - Math.max(0, total / settled.length - 15) / 75, 0, 1));
-    }
-    return [
-      { label: "Pelunasan", val: repay, color: "var(--mint-500)" },
-      { label: "Aktivitas", val: punct, color: "var(--lav-500)" },
-      { label: "Kecepatan", val: speed, color: "var(--orange-500)" },
-    ];
-  }
+  function cap(value) { const text = String(value || ""); return text.charAt(0).toUpperCase() + text.slice(1); }
 
   function loanCard(l, manual) {
     const ls = Calc.loanSummary(l, state.payments);
@@ -778,20 +750,56 @@
         <button class="icon-btn" data-act="back" aria-label="Kembali">${icon("ic-back")}</button>
         <span class="tb-title">Pengingat</span><span style="width:42px"></span>
       </header>
-      ${rem.length ? `<div class="list stagger" style="margin-top:6px">${rem.map(remCardHtml).join("")}</div>
-        <div class="io-info"><span>${icon("ic-info")}</span><div class="it"><b>Pengingat otomatis</b>Muncul untuk debitur yang masih punya sisa dan sudah lama tidak melakukan pembayaran.</div></div>`
+      ${rem.length ? `<div class="list stagger" style="margin-top:6px">${rem.map((item) => remCardHtml(item, true)).join("")}</div>
+        <div class="io-info"><span>${icon("ic-info")}</span><div class="it"><b>Satu pengingat per debitur</b>Pengaturan manual menggantikan batas otomatis. Gunakan Tunda atau Sudah Diingatkan agar pengingat lama tidak terus muncul tanpa jeda.</div></div>`
         : `<div class="empty" style="margin-top:30px"><div class="e-art">${ART.calm}</div>
-            <h3>Semua aman 👌</h3><p>Tidak ada pengingat saat ini. Tidak ada pembayaran yang tertunda terlalu lama.</p></div>`}
+            <h3>Semua aman 👌</h3><p>Tidak ada pengingat yang jatuh tempo. Jadwal tiap debitur dapat diatur lewat Tambah atau Ubah Debitur.</p></div>`}
       <div style="height:14px"></div>
     `, { nav: false });
   }
-  function remCardHtml(r) {
+  function remCardHtml(r, actions = false) {
     const sev = r.severity === "high" ? " over" : "";
-    return `<button class="rem-card${sev}" data-act="go" data-go="/peminjam/${r.debtorId}">
-      <div class="rem-ic">${icon("ic-alert")}</div>
-      <div class="rem-main"><div class="rn">${escapeHtml(r.name)}</div><div class="rd">${escapeHtml(r.message)}</div></div>
-      <div class="rem-amt tnum">${rupiah(r.remaining)}</div>
-    </button>`;
+    if (!actions) {
+      return `<button class="rem-card${sev}" data-act="go" data-go="/peminjam/${encodeURIComponent(r.debtorId)}">
+        <div class="rem-ic">${icon("ic-alert")}</div>
+        <div class="rem-main"><div class="rn">${escapeHtml(r.name)}</div><div class="rd">${escapeHtml(r.message)}</div></div>
+        <div class="rem-amt tnum">${rupiah(r.remaining)}</div>
+      </button>`;
+    }
+    return `<div class="rem-card rem-card-actions${sev}">
+      <button class="rem-open" data-act="go" data-go="/peminjam/${encodeURIComponent(r.debtorId)}">
+        <div class="rem-ic">${icon("ic-alert")}</div>
+        <div class="rem-main"><div class="rn">${escapeHtml(r.name)}</div><div class="rd">${escapeHtml(r.message)}</div></div>
+        <div class="rem-amt tnum">${rupiah(r.remaining)}</div>
+      </button>
+      <div class="rem-actions">
+        <button class="rem-action" data-act="rem-snooze" data-debtor="${escapeAttr(r.debtorId)}">Tunda 7 hari</button>
+        <button class="rem-action primary" data-act="rem-ack" data-debtor="${escapeAttr(r.debtorId)}">Sudah diingatkan</button>
+      </div>
+    </div>`;
+  }
+
+  async function postponeReminder(debtorId, days = 7) {
+    const debtor = byId("debtors", debtorId);
+    if (!debtor) return;
+    debtor.reminderSnoozedUntil = new Date(Date.now() + days * DAY).toISOString();
+    await DB.put("debtors", debtor);
+    await refresh();
+    rerender();
+    toast(`Pengingat ditunda ${days} hari`, "ok");
+  }
+
+  async function acknowledgeReminder(debtorId) {
+    const debtor = byId("debtors", debtorId);
+    if (!debtor) return;
+    const config = Calc.reminderConfig(debtor);
+    if (!config.enabled) return;
+    debtor.reminderNextAt = new Date(Date.now() + config.days * DAY).toISOString();
+    debtor.reminderSnoozedUntil = "";
+    await DB.put("debtors", debtor);
+    await refresh();
+    rerender();
+    toast(`Pengingat berikutnya dijadwalkan ${config.days} hari lagi`, "ok");
   }
 
   /* ---------------------------------------------------------
@@ -1546,6 +1554,22 @@
 
   const TAGS = ["Tetangga", "Keluarga", "Teman", "Pelanggan", "Warung", "UMKM", "Lainnya"];
 
+  function reminderFormState(debtor) {
+    const config = Calc.reminderConfig(debtor || {});
+    if (!config.enabled) return { preset: "off", customDays: 30 };
+    if (config.mode === "auto") return { preset: "auto", customDays: 45 };
+    if ([30, 60, 90].includes(config.days)) return { preset: String(config.days), customDays: config.days };
+    return { preset: "custom", customDays: config.days };
+  }
+
+  function toggleReminderCustom() {
+    const select = document.getElementById("f-reminder-preset");
+    const wrap = document.getElementById("f-reminder-custom-wrap");
+    if (!select || !wrap) return;
+    wrap.classList.toggle("hidden", select.value !== "custom");
+    if (select.value === "custom") document.getElementById("f-reminder-days")?.focus();
+  }
+
   // isi bingkai foto (kotak + tombol hapus); dipakai ulang saat refresh
   function photoFrameInner() {
     const box = `<div class="photo-box${debtorPhoto ? " has" : ""}" data-act="photo-pick" role="button" tabindex="0" aria-label="Pilih foto debitur">${
@@ -1576,6 +1600,7 @@
     const ddItems = TAGS.map((t) =>
       `<button type="button" class="dd-item${selected === t ? " active" : ""}" data-act="dd-pick" data-val="${t}">${t}</button>`).join("");
     const triggerLabel = selected ? escapeHtml(selected) : "Pilih label";
+    const reminder = reminderFormState(d);
 
     return `
       <div class="field photo-field">
@@ -1606,6 +1631,22 @@
         <input type="hidden" id="f-tag" value="${escapeHtml(selected)}">
         <input class="input dd-custom" id="f-tag-custom" maxlength="60" placeholder="Ketik label sendiri…" autocomplete="off"
           value="${isCustomTag ? escapeHtml(tag) : ""}" style="margin-top:8px;${selected === "Lainnya" ? "" : "display:none"}"></div>
+
+      <div class="field reminder-field"><label>Pengingat pembayaran</label>
+        <div class="select-wrap"><select class="select" id="f-reminder-preset" data-input="reminder-preset">
+          <option value="auto"${reminder.preset === "auto" ? " selected" : ""}>Otomatis · 45 hari tanpa aktivitas</option>
+          <option value="30"${reminder.preset === "30" ? " selected" : ""}>Ingatkan setelah 30 hari</option>
+          <option value="60"${reminder.preset === "60" ? " selected" : ""}>Ingatkan setelah 60 hari</option>
+          <option value="90"${reminder.preset === "90" ? " selected" : ""}>Ingatkan setelah 90 hari</option>
+          <option value="custom"${reminder.preset === "custom" ? " selected" : ""}>Atur jumlah hari sendiri</option>
+          <option value="off"${reminder.preset === "off" ? " selected" : ""}>Nonaktifkan pengingat</option>
+        </select></div>
+        <div id="f-reminder-custom-wrap" class="reminder-custom${reminder.preset === "custom" ? "" : " hidden"}">
+          <input class="input" id="f-reminder-days" type="number" inputmode="numeric" min="1" max="3650" value="${reminder.customDays}" aria-label="Jumlah hari pengingat">
+          <span>hari sejak aktivitas terakhir</span>
+        </div>
+        <div class="hint">Aktivitas baru akan menggeser jadwal. Hanya satu aturan yang aktif agar tidak muncul pengingat ganda.</div>
+      </div>
 
       <div class="field"><label>Catatan <span class="opt">(opsional)</span></label>
         <textarea class="textarea" id="f-note" maxlength="2000" placeholder="cth. teman kerja, biasanya bayar tiap gajian">${d ? escapeHtml(d.note || "") : ""}</textarea></div>
@@ -2123,7 +2164,7 @@
       <div class="center" style="padding:6px 4px 10px">
         <img src="icons/icon-192.png" alt="" style="width:72px;height:72px;border-radius:20px;margin:0 auto 12px;box-shadow:var(--sh-md)">
         <h3 style="font-size:19px;font-weight:800;color:var(--ink)">PiutangKu</h3>
-        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.5</p>
+        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.7</p>
       </div>
       <p style="font-size:13.5px;color:var(--text);line-height:1.6;margin:6px 2px">
         Aplikasi sederhana untuk mencatat siapa yang masih berutang kepadamu dan berapa sisanya.
@@ -2147,6 +2188,22 @@
       const custom = document.getElementById("f-tag-custom");
       tag = custom ? (custom.value || "").trim() : "";
     }
+    const reminderPreset = (document.getElementById("f-reminder-preset")?.value || "auto");
+    let reminderMode = "auto";
+    let reminderDays = 45;
+    if (reminderPreset === "off") {
+      reminderMode = "off";
+      reminderDays = 0;
+    } else if (reminderPreset === "custom") {
+      reminderMode = "custom";
+      reminderDays = Math.floor(Number(document.getElementById("f-reminder-days")?.value) || 0);
+      if (reminderDays < 1 || reminderDays > 3650) { toast("Jumlah hari pengingat harus antara 1–3650 hari", "err"); return; }
+    } else if (["30", "60", "90"].includes(reminderPreset)) {
+      reminderMode = "custom";
+      reminderDays = Number(reminderPreset);
+    }
+    const previousReminder = existing ? Calc.reminderConfig(existing) : null;
+    const reminderChanged = !previousReminder || previousReminder.mode !== reminderMode || previousReminder.days !== reminderDays;
     const obj = {
       id: id || Calc.uid(),
       name,
@@ -2157,6 +2214,10 @@
       emoji: existing ? (existing.emoji || "") : "",
       color: existing ? (existing.color || "") : "",
       note: (document.getElementById("f-note").value || "").trim(),
+      reminderMode,
+      ...(reminderMode === "custom" ? { reminderDays } : {}),
+      reminderNextAt: reminderChanged ? "" : (existing ? (existing.reminderNextAt || "") : ""),
+      reminderSnoozedUntil: reminderChanged ? "" : (existing ? (existing.reminderSnoozedUntil || "") : ""),
       createdAt: existing ? existing.createdAt : Calc.todayISO(),
       loanSort: existing ? existing.loanSort : undefined,
     };
@@ -2540,6 +2601,7 @@
     "create-debtor", "save-debtor", "create-loan", "save-loan", "create-payment",
     "del-attach", "confirm-del-debtor", "confirm-del-loan", "del-loans-do", "confirm-del-payment",
     "confirm-seed", "confirm-clear", "import-replace", "import-merge", "storage-persist",
+    "rem-snooze", "rem-ack",
   ]);
 
   $app.addEventListener("click", async (e) => {
@@ -2593,6 +2655,8 @@
       case "edit-loan": openEditLoan(id); break;
       case "add-payment": openAddPayment(loanId); break;
       case "about": openAbout(); break;
+      case "rem-snooze": await postponeReminder(debtorId, 7); break;
+      case "rem-ack": await acknowledgeReminder(debtorId); break;
 
       case "pay-open": openPaySheet(debtorId); break;
       case "pay-quick": {
@@ -2947,6 +3011,10 @@
   // mengedit kolom agar pengetikan nominal tidak terganggu dialog berulang.
   $app.addEventListener("change", (event) => {
     const input = event.target;
+    if (input && input.id === "f-reminder-preset") {
+      toggleReminderCustom();
+      return;
+    }
     if (paySheet && paySheet.mode === "manual" && input.classList && input.classList.contains("pa-amt")) {
       validateManualAmountInput(input);
     }

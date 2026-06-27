@@ -894,3 +894,40 @@ body.dragging-active{user-select:none;-webkit-user-select:none;cursor:grabbing;}
 .storage-persist{margin-top:14px;}
 .drag-handle:focus-visible{outline:2.5px solid var(--mint-700);outline-offset:2px;}
 .update-banner{z-index:65;}
+
+/* ------------------- Profil pembayaran + pengingat fleksibel ------------ */
+.trust-confidence{
+  display:inline-flex;align-items:center;margin-top:6px;padding:3px 8px;border-radius:var(--pill);
+  font-size:10.5px;font-weight:800;line-height:1.35;background:var(--lav-100);color:var(--lav-700);
+}
+.trust-confidence.high{background:var(--pos-bg);color:var(--pos);}
+.trust-confidence.medium{background:var(--lav-100);color:var(--lav-700);}
+.trust-confidence.low,.trust-confidence.none{background:var(--orange-50);color:var(--orange-700);}
+
+.reminder-field{padding-top:2px;}
+.reminder-custom{
+  display:flex;align-items:center;gap:10px;margin-top:10px;padding:10px 12px;
+  border-radius:var(--r-sm);background:var(--mint-50);color:var(--mint-700);
+  font-size:12.5px;font-weight:700;
+}
+.reminder-custom .input{width:108px;padding:10px 12px;background:#fff;}
+
+.rem-card-actions{display:block;padding:0;overflow:hidden;}
+.rem-open{
+  display:flex;gap:13px;align-items:flex-start;width:100%;padding:14px;text-align:left;
+  background:transparent;transition:background .15s,transform .12s;
+}
+.rem-open:active{background:var(--orange-50);}
+.rem-open .rem-main{padding-top:1px;}
+.rem-actions{
+  display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 12px 12px 65px;
+}
+.rem-action{
+  min-height:38px;padding:8px 10px;border-radius:var(--r-xs);background:var(--bg-warm);
+  color:var(--text);font-size:11.5px;font-weight:800;border:1px solid var(--line-strong);
+}
+.rem-action.primary{background:var(--mint-100);color:var(--mint-700);border-color:var(--mint-200);}
+.rem-action:active{transform:scale(.98);}
+@media (max-width:370px){
+  .rem-actions{grid-template-columns:1fr;padding-left:65px;}
+}
