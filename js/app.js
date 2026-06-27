@@ -1801,6 +1801,35 @@
     return { ok: true, alloc: next, selected, finalTotal };
   }
 
+  function validateManualAllocationState(alloc, total, remainingById) {
+    const sourceTotal = Math.max(0, Math.floor(Number(total) || 0));
+    const limits = remainingById && typeof remainingById === "object" ? remainingById : {};
+    let sum = 0;
+
+    for (const [loanId, rawAmount] of Object.entries(alloc || {})) {
+      const amount = Math.max(0, Math.floor(Number(rawAmount) || 0));
+      if (amount <= 0) continue;
+
+      if (amount > sourceTotal) {
+        return { ok: false, type: "over-total", loanId, amount, max: sourceTotal };
+      }
+      if (!Object.prototype.hasOwnProperty.call(limits, loanId)) {
+        return { ok: false, type: "invalid-loan", loanId };
+      }
+      const debtLimit = Math.max(0, Math.floor(Number(limits[loanId]) || 0));
+      if (amount > debtLimit) {
+        return { ok: false, type: "over-debt", loanId, amount, max: debtLimit };
+      }
+
+      sum += amount;
+      if (sum > sourceTotal) {
+        return { ok: false, type: "over-sum", sum, max: sourceTotal };
+      }
+    }
+
+    return { ok: true, sum, max: sourceTotal };
+  }
+
   function restoreRejectedManualInput(input, previous) {
     const loanId = input.dataset.loan || "";
     setManualAllocation(loanId, previous);
@@ -1822,7 +1851,10 @@
     const debtRemaining = Math.max(0, Math.floor(Number(input.dataset.max) || 0));
     const previous = manualInputCommittedValue(input);
 
-    setManualAllocation(loanId, requested);
+    // Penting: jangan masukkan draft ke paySheet.alloc sebelum lolos validasi.
+    // Pada versi sebelumnya nilai besar sempat masuk ke state saat event input,
+    // sehingga pada sebagian perangkat nilai itu bisa mencapai commit sebelum
+    // event change selesai diproses.
     const decision = manualAllocationDecision(
       requested, total, manualAllocatedExcept(loanId), debtRemaining, previous
     );
@@ -1842,11 +1874,15 @@
     }
 
     if (decision.type === "reallocate") {
+      // State tetap memakai alokasi terakhir yang valid sampai pengguna
+      // menyelesaikan dialog realokasi.
       setManualAmountInvalid(input, true);
+      updateManualRowOutcome(input, previous);
       if (allowDialog) openManualPayDialog(input, decision);
       return false;
     }
 
+    setManualAllocation(loanId, requested);
     input.dataset.committed = String(requested || 0);
     setManualAmountInvalid(input, false);
     updateManualRowOutcome(input, requested);
@@ -1864,9 +1900,10 @@
     return true;
   }
 
-  function payFootManual(d) {
+  function payFootManual(d, previewSum = null) {
     const amount = paySheet ? paySheet.amount : 0;
-    const sum = Object.values(paySheet ? paySheet.alloc : {}).reduce((s, v) => s + (Number(v) || 0), 0);
+    const committed = Object.values(paySheet ? paySheet.alloc : {}).reduce((s, v) => s + (Number(v) || 0), 0);
+    const sum = previewSum == null ? committed : Math.max(0, Math.floor(Number(previewSum) || 0));
     const over = amount > 0 && sum > amount;
     return `<span>Total dialokasikan</span><span class="tnum${over ? " over" : ""}">${rupiah(sum)}${amount > 0 ? ` / ${rupiah(amount)}` : ""}</span>`;
   }
@@ -1965,7 +2002,25 @@
         if (pay > 0) { alloc[lid] = pay; sum += pay; }
       }
       if (sum <= 0) { toast("Belum ada nominal yang dialokasikan", "err"); return; }
-      if (paySheet.amount > 0 && sum > paySheet.amount) { toast("Total alokasi melebihi nominal pembayaran", "err"); return; }
+
+      // Pertahanan terakhir sebelum transaksi: jangan hanya memeriksa jumlah
+      // keseluruhan. Setiap alokasi individual juga wajib <= sumber SmartPay
+      // dan <= sisa hutang terkait.
+      const guard = validateManualAllocationState(alloc, paySheet.amount, remById);
+      if (!guard.ok) {
+        if (guard.type === "over-total") {
+          toast(`Nominal input melebihi total pembayaran SmartPay. Masukkan nominal maksimal ${rupiah(guard.max)}.`, "err");
+        } else if (guard.type === "over-debt") {
+          toast(`Nominal input melebihi sisa hutang. Masukkan nominal maksimal ${rupiah(guard.max)}.`, "err");
+        } else if (guard.type === "over-sum") {
+          toast(`Total alokasi melebihi nominal pembayaran SmartPay ${rupiah(guard.max)}.`, "err");
+        } else {
+          toast("Alokasi memuat hutang yang tidak lagi aktif. Muat ulang pembayaran.", "err");
+        }
+        const badInput = Array.from($app.querySelectorAll(".pa-amt")).find((input) => input.dataset.loan === guard.loanId);
+        if (badInput) focusManualAmount(badInput);
+        return;
+      }
     } else {
       if (!paySheet.amount || paySheet.amount <= 0) { toast("Masukkan nominal pembayaran dulu", "err"); return; }
       alloc = Calc.smartAllocate(paySheet.amount, active).alloc;
@@ -2003,7 +2058,7 @@
       <div class="center" style="padding:6px 4px 10px">
         <img src="icons/icon-192.png" alt="" style="width:72px;height:72px;border-radius:20px;margin:0 auto 12px;box-shadow:var(--sh-md)">
         <h3 style="font-size:19px;font-weight:800;color:var(--ink)">PiutangKu</h3>
-        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.4</p>
+        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.5</p>
       </div>
       <p style="font-size:13.5px;color:var(--text);line-height:1.6;margin:6px 2px">
         Aplikasi sederhana untuk mencatat siapa yang masih berutang kepadamu dan berapa sisanya.
@@ -2792,19 +2847,39 @@
       if (paySheet.mode === "smart") refreshPayAlloc(d);
       else { const f = document.getElementById("pa-foot"); if (f) f.innerHTML = payFootManual(d); }
     } else if (paySheet && t.classList.contains("pa-amt")) {
-      setManualAmountInvalid(t, false);
       const v = Math.max(0, Math.floor(Calc.parseRupiah(t.value) || 0));
-      setManualAllocation(t.dataset.loan, v);
+      const total = Math.max(0, Math.floor(Number(paySheet.amount) || 0));
+      const debtRemaining = Math.max(0, Math.floor(Number(t.dataset.max) || 0));
+      const previous = manualInputCommittedValue(t);
+
+      // Hard limit langsung pada event input. Draft yang melampaui sumber
+      // SmartPay atau sisa hutang tidak pernah ditulis ke paySheet.alloc.
+      if (v > total) {
+        restoreRejectedManualInput(t, previous);
+        toast(`Nominal input melebihi total pembayaran SmartPay. Masukkan nominal maksimal ${rupiah(total)}.`, "err");
+        return;
+      }
+      if (v > debtRemaining) {
+        restoreRejectedManualInput(t, previous);
+        toast(`Nominal input melebihi sisa hutang. Masukkan nominal maksimal ${rupiah(debtRemaining)}.`, "err");
+        return;
+      }
+
+      setManualAmountInvalid(t, false);
       updateManualRowOutcome(t, v);
+      const draftSum = Array.from($app.querySelectorAll(".pa-amt")).reduce(
+        (sum, input) => sum + Math.max(0, Math.floor(Calc.parseRupiah(input.value) || 0)), 0
+      );
       const f = document.getElementById("pa-foot");
-      if (f) f.innerHTML = payFootManual(byId("debtors", paySheet.debtorId));
+      if (f) f.innerHTML = payFootManual(byId("debtors", paySheet.debtorId), draftSum);
     } else if (activeManualPayDialog && t.classList.contains("realloc-amt")) {
       updateManualReallocationUI();
     }
   });
 
-  // Validasi dijalankan setelah pengguna selesai mengedit satu kolom, bukan pada
-  // setiap digit, agar pengetikan nominal besar tidak terganggu dialog berulang.
+  // Batas absolut (melebihi sumber SmartPay atau sisa hutang) diblokir langsung
+  // saat mengetik. Dialog realokasi tetap dijalankan setelah pengguna selesai
+  // mengedit kolom agar pengetikan nominal tidak terganggu dialog berulang.
   $app.addEventListener("change", (event) => {
     const input = event.target;
     if (paySheet && paySheet.mode === "manual" && input.classList && input.classList.contains("pa-amt")) {
