@@ -5,7 +5,7 @@
 const Calc = (() => {
   const DAY = 86400000;
   const MAX_MONEY = 1_000_000_000_000_000;
-  const BACKUP_VERSION = 2;
+  const BACKUP_VERSION = 3;
   const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
   function dateValue(v) {
@@ -452,6 +452,7 @@ const Calc = (() => {
 
     const debtors = [];
     const debtorIds = new Set();
+    const pendingGalleryByDebtor = new Map();
     for (let i = 0; i < obj.debtors.length; i++) {
       const source = obj.debtors[i];
       if (!source || typeof source !== "object" || Array.isArray(source)) return failImport(`Debitur ke-${i + 1} tidak valid.`);
@@ -488,6 +489,55 @@ const Calc = (() => {
         const by = ["amount", "date", "manual"].includes(source.loanSort.by) ? source.loanSort.by : "date";
         normalized.loanSort = { by, dir: source.loanSort.dir === "asc" ? "asc" : "desc" };
       }
+
+      const sourceGallery = source.galleryAttachments == null ? [] : source.galleryAttachments;
+      if (!Array.isArray(sourceGallery) || sourceGallery.length > 24) {
+        return failImport(`Galeri bukti debitur “${name}” melebihi batas 24 gambar.`);
+      }
+      const galleryIds = new Set();
+      const galleryAttachments = [];
+      for (let j = 0; j < sourceGallery.length; j++) {
+        const attachment = sourceGallery[j];
+        if (!attachment || typeof attachment !== "object" || Array.isArray(attachment)) {
+          return failImport(`Bukti galeri ke-${j + 1} milik “${name}” rusak.`);
+        }
+        const attachmentId = cleanId(attachment.id);
+        const image = imageDataInfo(attachment.dataUrl, 1600 * 1024);
+        const attachmentName = cleanText(attachment.name || `bukti-${j + 1}.jpg`, 120, true);
+        const created = cleanCreatedAt(attachment.createdAt, createdAt);
+        const rawLoanIds = attachment.loanIds;
+        if (!attachmentId || galleryIds.has(attachmentId)) {
+          return failImport(`ID bukti galeri ke-${j + 1} milik “${name}” tidak valid atau duplikat.`);
+        }
+        if (!image.ok || !attachmentName) {
+          return failImport(`Bukti galeri ke-${j + 1} milik “${name}” tidak valid atau terlalu besar.`);
+        }
+        if (!created) return failImport(`Waktu bukti galeri ke-${j + 1} milik “${name}” tidak valid.`);
+        if (!Array.isArray(rawLoanIds) || rawLoanIds.length < 1 || rawLoanIds.length > 100) {
+          return failImport(`Tag hutang pada bukti galeri ke-${j + 1} milik “${name}” tidak valid.`);
+        }
+        const loanIds = [];
+        const seenLoanIds = new Set();
+        for (const rawLoanId of rawLoanIds) {
+          const loanId = cleanId(rawLoanId);
+          if (!loanId || seenLoanIds.has(loanId)) {
+            return failImport(`Tag hutang pada bukti galeri ke-${j + 1} milik “${name}” rusak atau duplikat.`);
+          }
+          seenLoanIds.add(loanId);
+          loanIds.push(loanId);
+        }
+        galleryIds.add(attachmentId);
+        galleryAttachments.push({
+          id: attachmentId,
+          name: attachmentName,
+          type: image.type,
+          dataUrl: image.value,
+          createdAt: created,
+          loanIds,
+        });
+      }
+      normalized.galleryAttachments = [];
+      pendingGalleryByDebtor.set(id, galleryAttachments);
       debtors.push(normalized);
       debtorIds.add(id);
     }
@@ -526,6 +576,20 @@ const Calc = (() => {
       loans.push(normalized);
       loanIds.add(id);
       loanById.set(id, normalized);
+    }
+
+    for (const debtor of debtors) {
+      const galleryAttachments = pendingGalleryByDebtor.get(debtor.id) || [];
+      for (let i = 0; i < galleryAttachments.length; i++) {
+        const attachment = galleryAttachments[i];
+        for (const loanId of attachment.loanIds) {
+          const loan = loanById.get(loanId);
+          if (!loan || loan.debtorId !== debtor.id) {
+            return failImport(`Bukti galeri ke-${i + 1} milik “${debtor.name}” merujuk hutang yang tidak ditemukan atau milik debitur lain.`);
+          }
+        }
+      }
+      debtor.galleryAttachments = galleryAttachments;
     }
 
     const payments = [];
@@ -567,7 +631,7 @@ const Calc = (() => {
     const payments = [];
     const D = (name, phone, tag, note) => {
       const id = uid();
-      debtors.push({ id, name, phone, tag, note, createdAt: iso(60) });
+      debtors.push({ id, name, phone, tag, note, galleryAttachments: [], createdAt: iso(60) });
       return id;
     };
     const L = (debtorId, amount, daysAgo, description) => {

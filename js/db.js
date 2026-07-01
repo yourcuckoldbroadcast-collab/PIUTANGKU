@@ -237,6 +237,28 @@ const DB = (() => {
     });
   }
 
+  // Hapus beberapa pinjaman sekaligus dan perbarui data debitur dalam
+  // transaksi yang sama. Dipakai saat relasi lampiran galeri harus dibersihkan.
+  function deleteLoansCascadeAndPutDebtor(loanIds, debtor) {
+    const ids = Array.from(new Set((loanIds || []).filter(Boolean)));
+    if (!ids.length) return debtor ? put("debtors", debtor) : Promise.resolve();
+    const idSet = new Set(ids);
+    return transact(["debtors", "loans", "payments"], "readwrite", async (stores) => {
+      await new Promise((resolve, reject) => {
+        const req = stores.payments.openCursor();
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const cursor = req.result;
+          if (!cursor) { resolve(); return; }
+          if (idSet.has(cursor.value.loanId)) cursor.delete();
+          cursor.continue();
+        };
+      });
+      await Promise.all(ids.map((id) => requestResult(stores.loans.delete(id))));
+      if (debtor) await requestResult(stores.debtors.put(debtor));
+    });
+  }
+
   function putDebtorAndLoans(debtor, loans) {
     return transact(["debtors", "loans"], "readwrite", async (stores) => {
       await requestResult(stores.debtors.put(debtor));
@@ -311,6 +333,6 @@ const DB = (() => {
     open, close, transact, snapshot,
     getAll, get, put, putMany, del, byIndex,
     clearAll, replaceAll, addPayments, saveLoan, putDebtorAndLoans,
-    deleteDebtorCascade, deleteLoanCascade, deleteLoansCascade,
+    deleteDebtorCascade, deleteLoanCascade, deleteLoansCascade, deleteLoansCascadeAndPutDebtor,
   };
 })();

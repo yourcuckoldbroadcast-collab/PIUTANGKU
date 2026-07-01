@@ -29,9 +29,12 @@
   let attachmentViewerSeq = 0;
   let activeManualPayDialog = null;
   let lastManualPayFocus = null;
+  let debtorGallery = null;          // galeri lampiran agregat per debitur
+  let galleryDraft = null;            // unggahan/penyuntingan tag lampiran bersama
 
   const MAX_MONEY = 1_000_000_000_000_000;
   const MAX_ATTACHMENTS = 8;
+  const MAX_GALLERY_ATTACHMENTS = 24;
   const MAX_SOURCE_IMAGE_BYTES = 12 * 1024 * 1024;
   const MAX_ATTACHMENT_BYTES = 1600 * 1024;
   const MAX_AVATAR_BYTES = 600 * 1024;
@@ -366,6 +369,7 @@
     if (!d) { go("/peminjam"); return; }
     const s = Calc.debtorSummary(d, state.loans, state.payments);
     const ts = Calc.trustScore(d, state.loans, state.payments);
+    const galleryCount = debtorAttachmentItems(d.id).length;
 
     const sortPref = getLoanSort(d);
     const manualMode = sortPref.by === "manual";
@@ -382,7 +386,12 @@
         <button class="icon-btn ghost" data-act="del-debtor" data-id="${d.id}" aria-label="Hapus">${icon("ic-trash")}</button>
       </header>
 
-      <div class="profile-head">
+      <div class="profile-head has-gallery">
+        <button type="button" class="profile-gallery-btn" data-act="open-debtor-gallery" data-debtor="${escapeAttr(d.id)}"
+          aria-label="Buka galeri bukti${galleryCount ? `, ${galleryCount} lampiran` : ""}">
+          ${icon("ic-image")}
+          ${galleryCount ? `<span class="profile-gallery-count" aria-hidden="true">${galleryCount > 99 ? "99+" : galleryCount}</span>` : ""}
+        </button>
         <div class="profile-top">
           ${avatarHtml(d, "lg")}
           <div style="min-width:0">
@@ -474,7 +483,7 @@
       <div class="loan-top">
         ${manual ? `<span class="drag-handle" role="button" tabindex="0" data-loan="${escapeAttr(l.id)}" aria-label="Atur urutan ${escapeAttr(l.description || "pinjaman")}. Gunakan panah atas atau bawah.">${icon("ic-dots-h")}</span>` : ""}
         <div class="loan-head"><div class="loan-title">${escapeHtml(l.description || "Pinjaman")}</div>
-          <div class="loan-date">${tanggal(l.date)}${l.attachments && l.attachments.length ? " · " + icon("ic-image", 11) + " " + l.attachments.length : ""}</div></div>
+          <div class="loan-date">${tanggal(l.date)}${loanAttachmentCount(l) ? " · " + icon("ic-image", 11) + " " + loanAttachmentCount(l) : ""}</div></div>
         <div class="loan-amt tnum">${rupiah(l.amount)}</div>
       </div>
       <div class="loan-stats">
@@ -607,22 +616,35 @@
       : `<div class="tl-item"><div class="tl-node rest">${icon("ic-clock")}</div>
           <div class="tl-body"><div class="tt">Sisa belum dibayar</div><div class="vv rest tnum">${rupiah(ls.remaining)}</div></div></div>`;
 
-    const attachments = (l.attachments && l.attachments.length) || true ? `
-      <div class="summary"><h3>Bukti / Lampiran</h3>
-        <div class="attach-row" style="margin-top:0">
-          ${(l.attachments || []).map((a, i) => {
-            const src = safeImageSrc(a.dataUrl);
-            return src ? `<div class="attach-thumb">
-              <button type="button" class="attach-preview" data-act="open-attachment" data-loan="${escapeAttr(l.id)}" data-idx="${i}" aria-label="Buka lampiran ${i + 1} dalam tampilan besar">
-                <img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || `Lampiran ${i + 1}`)}" loading="lazy">
-                <span class="attach-zoom-cue" aria-hidden="true">${icon("ic-search")}</span>
-              </button>
-              <button type="button" class="x" data-act="del-attach" data-loan="${escapeAttr(l.id)}" data-idx="${i}" aria-label="Hapus lampiran ${i + 1}">${icon("ic-x")}</button>
-            </div>` : "";
-          }).join("")}
-          <button class="attach-add" data-act="add-attach" data-loan="${l.id}" aria-label="Tambah bukti">${icon("ic-plus")}</button>
-        </div>
+    const sharedAttachments = loanSharedAttachments(l.id);
+    const localAttachmentHtml = (l.attachments || []).map((a, i) => {
+      const src = safeImageSrc(a.dataUrl);
+      return src ? `<div class="attach-thumb">
+        <button type="button" class="attach-preview" data-act="open-attachment" data-loan="${escapeAttr(l.id)}" data-idx="${i}" aria-label="Buka lampiran ${i + 1} dalam tampilan besar">
+          <img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || `Lampiran ${i + 1}`)}" loading="lazy">
+          <span class="attach-zoom-cue" aria-hidden="true">${icon("ic-search")}</span>
+        </button>
+        <button type="button" class="x" data-act="del-attach" data-loan="${escapeAttr(l.id)}" data-idx="${i}" aria-label="Hapus lampiran ${i + 1}">${icon("ic-x")}</button>
       </div>` : "";
+    }).join("");
+    const sharedAttachmentHtml = sharedAttachments.map((a, i) => {
+      const src = safeImageSrc(a.dataUrl);
+      return src ? `<div class="attach-thumb shared">
+        <button type="button" class="attach-preview" data-act="open-gallery-attachment" data-debtor="${escapeAttr(l.debtorId)}" data-attachment="${escapeAttr(a.id)}" aria-label="Buka bukti galeri ${i + 1} dalam tampilan besar">
+          <img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || `Bukti galeri ${i + 1}`)}" loading="lazy">
+          <span class="attach-shared-cue" aria-hidden="true">Galeri</span>
+          <span class="attach-zoom-cue" aria-hidden="true">${icon("ic-search")}</span>
+        </button>
+      </div>` : "";
+    }).join("");
+    const attachments = `
+      <div class="summary"><h3>Bukti / Lampiran${loanAttachmentCount(l) ? ` · ${loanAttachmentCount(l)}` : ""}</h3>
+        <div class="attach-row" style="margin-top:0">
+          ${localAttachmentHtml}${sharedAttachmentHtml}
+          <button class="attach-add" data-act="add-attach" data-loan="${escapeAttr(l.id)}" aria-label="Tambah bukti langsung ke hutang">${icon("ic-plus")}</button>
+        </div>
+        ${sharedAttachments.length ? `<div class="shared-attach-note">${icon("ic-info", 12)} Bukti berlabel Galeri disimpan satu kali dan ditautkan ke beberapa hutang. Ubah tagnya melalui Galeri Bukti debitur.</div>` : ""}
+      </div>`;
 
     render(`
       <header class="topbar">
@@ -917,6 +939,8 @@
   function closeScrim() {
     if (activeManualPayDialog) closeManualPayDialog({ restoreFocus: false });
     paySheet = null;
+    debtorGallery = null;
+    galleryDraft = null;
     const restore = lastModalFocus;
     lastModalFocus = null;
     $app.querySelectorAll(".scrim").forEach((scrim) => {
@@ -1265,6 +1289,374 @@
     toast(`Realokasi ke ${current.targetName} diterapkan`, "ok");
   }
 
+
+  /* ---------------------------------------------------------
+     GALERI BUKTI DEBITUR — satu gambar dapat ditautkan ke banyak hutang
+     --------------------------------------------------------- */
+  function galleryAttachmentsOf(debtor) {
+    return debtor && Array.isArray(debtor.galleryAttachments) ? debtor.galleryAttachments : [];
+  }
+
+  function linkedLoanMeta(loanId) {
+    const loan = byId("loans", loanId);
+    if (!loan) return null;
+    const summary = Calc.loanSummary(loan, state.payments);
+    return {
+      id: loan.id,
+      name: String(loan.description || "Pinjaman"),
+      date: loan.date || loan.createdAt || "",
+      active: summary.remaining > 0,
+      remaining: summary.remaining,
+    };
+  }
+
+  function loanSharedAttachments(loanId) {
+    const loan = byId("loans", loanId);
+    const debtor = loan ? byId("debtors", loan.debtorId) : null;
+    if (!debtor) return [];
+    return galleryAttachmentsOf(debtor)
+      .filter((attachment) => Array.isArray(attachment.loanIds) && attachment.loanIds.includes(loanId))
+      .filter((attachment) => safeImageSrc(attachment.dataUrl));
+  }
+
+  function loanAttachmentCount(loan) {
+    if (!loan) return 0;
+    const local = Array.isArray(loan.attachments) ? loan.attachments.filter((item) => safeImageSrc(item && item.dataUrl)).length : 0;
+    return local + loanSharedAttachments(loan.id).length;
+  }
+
+  function debtorAttachmentItems(debtorId) {
+    const debtor = byId("debtors", debtorId);
+    if (!debtor) return [];
+    const items = [];
+
+    galleryAttachmentsOf(debtor).forEach((attachment) => {
+      const src = safeImageSrc(attachment && attachment.dataUrl);
+      if (!src) return;
+      const loans = Array.from(new Set(Array.isArray(attachment.loanIds) ? attachment.loanIds : []))
+        .map(linkedLoanMeta)
+        .filter((loan) => loan && byId("loans", loan.id)?.debtorId === debtorId);
+      if (!loans.length) return;
+      const active = loans.some((loan) => loan.active);
+      items.push({
+        source: "shared",
+        attachmentId: attachment.id,
+        src,
+        name: String(attachment.name || "Bukti pembayaran"),
+        createdAt: attachment.createdAt || "",
+        loans,
+        active,
+      });
+    });
+
+    state.loans
+      .filter((loan) => loan.debtorId === debtorId)
+      .forEach((loan) => {
+        const meta = linkedLoanMeta(loan.id);
+        (Array.isArray(loan.attachments) ? loan.attachments : []).forEach((attachment, index) => {
+          const src = safeImageSrc(attachment && attachment.dataUrl);
+          if (!src || !meta) return;
+          items.push({
+            source: "loan",
+            loanId: loan.id,
+            index,
+            src,
+            name: String((attachment && attachment.name) || `Lampiran ${index + 1}`),
+            createdAt: loan.createdAt || loan.date || "",
+            loans: [meta],
+            active: meta.active,
+          });
+        });
+      });
+
+    return items.sort((a, b) =>
+      (Number(b.active) - Number(a.active)) ||
+      (_toTime(b.createdAt) - _toTime(a.createdAt)) ||
+      a.name.localeCompare(b.name)
+    );
+  }
+
+  function galleryLoanTagHtml(loan) {
+    const statusClass = loan.active ? "active" : "settled";
+    const statusText = loan.active ? `Aktif · sisa ${rupiah(loan.remaining)}` : "Lunas";
+    return `<button type="button" class="gallery-debt-tag ${statusClass}" data-act="debtor-gallery-go-loan" data-loan="${escapeAttr(loan.id)}" title="${escapeAttr(statusText)}">
+      <span class="dotk"></span><span>${escapeHtml(loan.name)}</span>
+    </button>`;
+  }
+
+  function debtorGalleryInner(debtorId, filter = "all") {
+    const debtor = byId("debtors", debtorId);
+    const all = debtorAttachmentItems(debtorId);
+    const activeCount = all.filter((item) => item.active).length;
+    const settledCount = all.filter((item) => !item.active).length;
+    const shown = filter === "active"
+      ? all.filter((item) => item.active)
+      : filter === "settled"
+        ? all.filter((item) => !item.active)
+        : all;
+    const linkedLoanCount = new Set(all.flatMap((item) => item.loans.map((loan) => loan.id))).size;
+    const sharedCount = galleryAttachmentsOf(debtor).length;
+
+    const filterButton = (value, label, count) =>
+      `<button type="button" class="gallery-filter${filter === value ? " active" : ""}" data-act="debtor-gallery-filter" data-val="${value}" aria-pressed="${filter === value}">${label}<span>${count}</span></button>`;
+
+    const cards = shown.map((item) => {
+      const statusClass = item.active ? "active" : "settled";
+      const statusLabel = item.active ? "Ada hutang aktif" : "Semua lunas";
+      const openData = item.source === "shared"
+        ? `data-act="open-gallery-attachment" data-debtor="${escapeAttr(debtorId)}" data-attachment="${escapeAttr(item.attachmentId)}"`
+        : `data-act="open-attachment" data-loan="${escapeAttr(item.loanId)}" data-idx="${item.index}"`;
+      const actions = item.source === "shared"
+        ? `<div class="gallery-card-actions">
+            <button type="button" data-act="gallery-edit-tags" data-debtor="${escapeAttr(debtorId)}" data-attachment="${escapeAttr(item.attachmentId)}">${icon("ic-tag", 14)} Ubah tag</button>
+            <button type="button" class="danger" data-act="gallery-delete-ask" data-debtor="${escapeAttr(debtorId)}" data-attachment="${escapeAttr(item.attachmentId)}">${icon("ic-trash", 14)} Hapus</button>
+          </div>`
+        : `<div class="gallery-card-actions"><button type="button" data-act="debtor-gallery-go-loan" data-loan="${escapeAttr(item.loanId)}">Buka hutang asal</button></div>`;
+      return `<article class="gallery-card">
+        <button type="button" class="gallery-thumb" ${openData} aria-label="Buka ${escapeAttr(item.name)}">
+          <img src="${escapeAttr(item.src)}" alt="" loading="lazy">
+          <span class="gallery-status ${statusClass}"><span class="dotk"></span>${statusLabel}</span>
+          ${item.source === "shared" ? `<span class="gallery-shared-badge">1 bukti · ${item.loans.length} tag</span>` : ""}
+          <span class="gallery-zoom" aria-hidden="true">${icon("ic-search")}</span>
+        </button>
+        <div class="gallery-meta">
+          <div class="gallery-file-name" title="${escapeAttr(item.name)}">${escapeHtml(item.name)}</div>
+          <div class="gallery-tags">${item.loans.map(galleryLoanTagHtml).join("")}</div>
+          ${actions}
+        </div>
+      </article>`;
+    }).join("");
+
+    let content;
+    if (!all.length) {
+      content = `<div class="gallery-empty">
+        <div class="gallery-empty-icon">${icon("ic-image")}</div>
+        <h4>Belum ada bukti pembayaran</h4>
+        <p>Unggah satu atau beberapa gambar, lalu tandai semua hutang yang dibayar oleh bukti tersebut.</p>
+        <button class="btn btn-primary sm gallery-empty-upload" data-act="gallery-upload" data-debtor="${escapeAttr(debtorId)}">${icon("ic-upload")} Unggah bukti</button>
+      </div>`;
+    } else if (!shown.length) {
+      content = `<div class="gallery-empty compact">
+        <div class="gallery-empty-icon">${icon(filter === "active" ? "ic-clock" : "ic-check-circle")}</div>
+        <h4>${filter === "active" ? "Tidak ada bukti bertag hutang aktif" : "Belum ada bukti dengan seluruh tag lunas"}</h4>
+        <p>Pilih filter lain untuk melihat bukti yang tersedia.</p>
+      </div>`;
+    } else {
+      content = `<div class="gallery-grid">${cards}</div>`;
+    }
+
+    return `<div class="debtor-gallery" data-gallery-debtor="${escapeAttr(debtorId)}">
+      <div class="gallery-summary">
+        <div><strong>${all.length}</strong><span>bukti</span></div>
+        <div><strong>${linkedLoanCount}</strong><span>hutang ditandai</span></div>
+        <p>Satu gambar disimpan sekali dan dapat muncul di beberapa hutang melalui tag.</p>
+      </div>
+      <button class="btn btn-primary gallery-upload-main" data-act="gallery-upload" data-debtor="${escapeAttr(debtorId)}"${sharedCount >= MAX_GALLERY_ATTACHMENTS ? " disabled" : ""}>${icon("ic-upload")} Unggah bukti & tandai hutang</button>
+      ${sharedCount >= MAX_GALLERY_ATTACHMENTS ? `<div class="gallery-limit-note">Batas ${MAX_GALLERY_ATTACHMENTS} bukti bersama per debitur telah tercapai.</div>` : ""}
+      <div class="gallery-filters" role="group" aria-label="Filter status hutang">
+        ${filterButton("all", "Semua", all.length)}
+        ${filterButton("active", "Aktif", activeCount)}
+        ${filterButton("settled", "Lunas", settledCount)}
+      </div>
+      ${content}
+    </div>`;
+  }
+
+  function openDebtorGallery(debtorId, filter = "all") {
+    const debtor = byId("debtors", debtorId);
+    if (!debtor) return;
+    debtorGallery = { debtorId, filter: ["all", "active", "settled"].includes(filter) ? filter : "all" };
+    openSheet("Galeri Bukti", debtorGalleryInner(debtorId, debtorGallery.filter));
+  }
+
+  function refreshDebtorGallery({ focusFilter = false } = {}) {
+    if (!debtorGallery) return;
+    const host = $app.querySelector(".debtor-gallery");
+    if (!host) return;
+    const filter = debtorGallery.filter;
+    host.outerHTML = debtorGalleryInner(debtorGallery.debtorId, filter);
+    if (focusFilter) {
+      const button = Array.from($app.querySelectorAll(".gallery-filter")).find((item) => item.dataset.val === filter);
+      button?.focus();
+    }
+  }
+
+  function galleryLoanChoices(debtorId) {
+    return state.loans
+      .filter((loan) => loan.debtorId === debtorId)
+      .map((loan) => {
+        const summary = Calc.loanSummary(loan, state.payments);
+        const lastPayment = summary.payments.reduce((latest, payment) => Math.max(latest, _toTime(payment.createdAt || payment.date)), 0);
+        return {
+          id: loan.id,
+          name: String(loan.description || "Pinjaman"),
+          amount: Number(loan.amount) || 0,
+          remaining: summary.remaining,
+          active: summary.remaining > 0,
+          activityAt: Math.max(lastPayment, _toTime(loan.createdAt || loan.date)),
+        };
+      })
+      .sort((a, b) => (b.activityAt - a.activityAt) || (Number(b.active) - Number(a.active)) || a.name.localeCompare(b.name));
+  }
+
+  function galleryTagEditorInner() {
+    if (!galleryDraft) return "";
+    const debtor = byId("debtors", galleryDraft.debtorId);
+    const choices = galleryLoanChoices(galleryDraft.debtorId);
+    const selected = galleryDraft.selectedLoanIds;
+    const rows = choices.map((loan) => {
+      const checked = selected.has(loan.id);
+      const after = loan.active ? `Sisa ${rupiah(loan.remaining)}` : "Lunas";
+      return `<label class="gallery-tag-choice${checked ? " selected" : ""}">
+        <input type="checkbox" data-input="gallery-loan-tag" value="${escapeAttr(loan.id)}"${checked ? " checked" : ""}>
+        <span class="gallery-tag-check">${icon("ic-check")}</span>
+        <span class="gallery-tag-copy"><strong>${escapeHtml(loan.name)}</strong><small>${rupiah(loan.amount)} · ${escapeHtml(after)}</small></span>
+        <span class="gallery-tag-state ${loan.active ? "active" : "settled"}">${loan.active ? "Aktif" : "Lunas"}</span>
+      </label>`;
+    }).join("");
+    const count = selected.size;
+    const title = galleryDraft.mode === "edit" ? "Ubah tag bukti" : `Tandai ${galleryDraft.attachments.length} bukti`;
+    return `<div class="gallery-tag-editor" data-gallery-tag-editor>
+      <div class="gallery-tag-intro">
+        <div class="gallery-tag-intro-icon">${icon("ic-tag")}</div>
+        <div><strong>${escapeHtml(title)}</strong><p>Pilih satu atau beberapa hutang ${escapeHtml(debtor ? debtor.name : "debitur")}. Gambar disimpan satu kali, lalu ditampilkan pada seluruh hutang yang dipilih.</p></div>
+      </div>
+      <div class="gallery-tag-summary"><span>Hutang dipilih</span><strong id="gallery-tag-count">${count}</strong></div>
+      <div class="gallery-tag-list">${rows || `<div class="gallery-empty compact"><h4>Belum ada hutang</h4><p>Tambahkan hutang terlebih dahulu sebelum menandai bukti.</p></div>`}</div>
+      <div class="gallery-tag-actions">
+        <button class="btn btn-ghost" data-act="gallery-tag-cancel">Batal</button>
+        <button class="btn btn-primary" id="gallery-tag-save" data-act="gallery-tag-save"${count ? "" : " disabled"}>${icon("ic-check")} ${galleryDraft.mode === "edit" ? "Simpan tag" : "Simpan bukti"}</button>
+      </div>
+    </div>`;
+  }
+
+  function openGalleryTagEditor() {
+    if (!galleryDraft) return;
+    openSheet(galleryDraft.mode === "edit" ? "Ubah Tag Hutang" : "Tandai Hutang", galleryTagEditorInner());
+  }
+
+  function startGalleryUpload(debtorId) {
+    const debtor = byId("debtors", debtorId);
+    if (!debtor) return;
+    const choices = galleryLoanChoices(debtorId);
+    if (!choices.length) { toast("Tambahkan hutang sebelum mengunggah bukti", "err"); return; }
+    const existing = galleryAttachmentsOf(debtor).length;
+    const room = Math.max(0, MAX_GALLERY_ATTACHMENTS - existing);
+    if (!room) { toast(`Maksimal ${MAX_GALLERY_ATTACHMENTS} bukti bersama per debitur`, "err"); return; }
+    pickFile("image/*", true, async (files) => {
+      if (!files.length) return;
+      const attachments = [];
+      for (const file of files.slice(0, room)) {
+        try {
+          const attachment = await attachmentFromFile(file);
+          attachments.push({ ...attachment, id: Calc.uid(), createdAt: new Date().toISOString(), loanIds: [] });
+        } catch (error) {
+          toast(userErrorMessage(error), "err");
+        }
+      }
+      if (files.length > room) toast(`Hanya ${room} gambar diproses karena batas galeri`, "err");
+      if (!attachments.length) return;
+      galleryDraft = { mode: "create", debtorId, attachments, selectedLoanIds: new Set() };
+      openGalleryTagEditor();
+    });
+  }
+
+  function startGalleryTagEdit(debtorId, attachmentId) {
+    const debtor = byId("debtors", debtorId);
+    const attachment = galleryAttachmentsOf(debtor).find((item) => item.id === attachmentId);
+    if (!attachment) { toast("Bukti tidak ditemukan", "err"); return; }
+    galleryDraft = {
+      mode: "edit",
+      debtorId,
+      attachmentId,
+      attachments: [attachment],
+      selectedLoanIds: new Set(Array.isArray(attachment.loanIds) ? attachment.loanIds : []),
+    };
+    openGalleryTagEditor();
+  }
+
+  function updateGalleryTagSelection(input) {
+    if (!galleryDraft || !input) return;
+    if (input.checked) galleryDraft.selectedLoanIds.add(input.value);
+    else galleryDraft.selectedLoanIds.delete(input.value);
+    input.closest(".gallery-tag-choice")?.classList.toggle("selected", input.checked);
+    const count = document.getElementById("gallery-tag-count");
+    if (count) count.textContent = String(galleryDraft.selectedLoanIds.size);
+    const save = document.getElementById("gallery-tag-save");
+    if (save) save.disabled = galleryDraft.selectedLoanIds.size === 0;
+  }
+
+  async function saveGalleryDraft() {
+    if (!galleryDraft || !galleryDraft.selectedLoanIds.size) {
+      toast("Pilih minimal satu hutang untuk ditandai", "err");
+      return;
+    }
+    const debtor = byId("debtors", galleryDraft.debtorId);
+    if (!debtor) return;
+    const validLoanIds = new Set(state.loans.filter((loan) => loan.debtorId === debtor.id).map((loan) => loan.id));
+    const loanIds = Array.from(galleryDraft.selectedLoanIds).filter((id) => validLoanIds.has(id));
+    if (!loanIds.length) { toast("Hutang yang dipilih tidak lagi tersedia", "err"); return; }
+    let next = galleryAttachmentsOf(debtor).slice();
+    if (galleryDraft.mode === "edit") {
+      next = next.map((attachment) => attachment.id === galleryDraft.attachmentId ? { ...attachment, loanIds } : attachment);
+    } else {
+      const additions = galleryDraft.attachments.map((attachment) => ({ ...attachment, loanIds: loanIds.slice() }));
+      if (next.length + additions.length > MAX_GALLERY_ATTACHMENTS) {
+        toast(`Maksimal ${MAX_GALLERY_ATTACHMENTS} bukti bersama per debitur`, "err");
+        return;
+      }
+      next.push(...additions);
+    }
+    try {
+      await DB.put("debtors", { ...debtor, galleryAttachments: next });
+      const debtorId = debtor.id;
+      const message = galleryDraft.mode === "edit" ? "Tag hutang diperbarui" : `${galleryDraft.attachments.length} bukti ditambahkan`;
+      galleryDraft = null;
+      await refresh();
+      openDebtorGallery(debtorId);
+      toast(message, "ok");
+    } catch (error) {
+      toast(userErrorMessage(error), "err");
+    }
+  }
+
+  function askDeleteSharedAttachment(debtorId, attachmentId) {
+    openDialog({
+      icon: "ic-trash",
+      title: "Hapus bukti dari galeri?",
+      msg: "Bukti akan hilang dari galeri dan dari seluruh hutang yang ditandai. Gambar hanya disimpan satu kali, jadi tindakan ini berlaku ke semua tag.",
+      confirmLabel: "Hapus Bukti",
+      act: "gallery-delete-confirm",
+      data: `data-debtor="${escapeAttr(debtorId)}" data-attachment="${escapeAttr(attachmentId)}"`,
+    });
+  }
+
+  async function deleteSharedAttachment(debtorId, attachmentId) {
+    const debtor = byId("debtors", debtorId);
+    if (!debtor) return;
+    const next = galleryAttachmentsOf(debtor).filter((attachment) => attachment.id !== attachmentId);
+    await DB.put("debtors", { ...debtor, galleryAttachments: next });
+    await refresh();
+    rerender();
+    toast("Bukti dihapus dari seluruh tag hutang", "ok");
+  }
+
+  function debtorAfterRemovingLoanTags(debtor, loanIds) {
+    if (!debtor) return null;
+    const removed = new Set(loanIds || []);
+    const current = galleryAttachmentsOf(debtor);
+    const next = current
+      .map((attachment) => ({
+        ...attachment,
+        loanIds: Array.from(new Set((Array.isArray(attachment.loanIds) ? attachment.loanIds : []).filter((id) => !removed.has(id)))),
+      }))
+      .filter((attachment) => attachment.loanIds.length > 0);
+    const changed = next.length !== current.length || next.some((attachment, index) => {
+      const before = current[index];
+      return !before || attachment.loanIds.join("|") !== (before.loanIds || []).join("|");
+    });
+    return changed ? { ...debtor, galleryAttachments: next } : debtor;
+  }
 
   /* ---------------------------------------------------------
      VIEWER LAMPIRAN — layar penuh, zoom, pinch, pan
@@ -2164,7 +2556,7 @@
       <div class="center" style="padding:6px 4px 10px">
         <img src="icons/icon-192.png" alt="" style="width:72px;height:72px;border-radius:20px;margin:0 auto 12px;box-shadow:var(--sh-md)">
         <h3 style="font-size:19px;font-weight:800;color:var(--ink)">PiutangKu</h3>
-        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.7</p>
+        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.9</p>
       </div>
       <p style="font-size:13.5px;color:var(--text);line-height:1.6;margin:6px 2px">
         Aplikasi sederhana untuk mencatat siapa yang masih berutang kepadamu dan berapa sisanya.
@@ -2220,6 +2612,7 @@
       reminderSnoozedUntil: reminderChanged ? "" : (existing ? (existing.reminderSnoozedUntil || "") : ""),
       createdAt: existing ? existing.createdAt : Calc.todayISO(),
       loanSort: existing ? existing.loanSort : undefined,
+      galleryAttachments: existing && Array.isArray(existing.galleryAttachments) ? existing.galleryAttachments.slice() : [],
     };
     await DB.put("debtors", obj);
     debtorPhoto = null;
@@ -2275,7 +2668,14 @@
   async function delLoan(id) {
     const loan = byId("loans", id);
     const debtorId = loan ? loan.debtorId : null;
-    await DB.deleteLoanCascade(id);
+    const debtor = debtorId ? byId("debtors", debtorId) : null;
+    const updatedDebtor = debtorAfterRemovingLoanTags(debtor, [id]);
+    if (DB.deleteLoansCascadeAndPutDebtor && updatedDebtor) {
+      await DB.deleteLoansCascadeAndPutDebtor([id], updatedDebtor);
+    } else {
+      await DB.deleteLoanCascade(id);
+      if (updatedDebtor && updatedDebtor !== debtor) await DB.put("debtors", updatedDebtor);
+    }
     await refresh();
     go(debtorId ? "/peminjam/" + debtorId : "/peminjam", { text: "Pinjaman dihapus", type: "ok" });
   }
@@ -2332,7 +2732,14 @@
     if (!d) return;
     const targets = delLoansTargets(d, mode);
     if (!targets.length) { toast("Tidak ada hutang yang dihapus", "err"); return; }
-    await DB.deleteLoansCascade(targets.map((loan) => loan.id));
+    const ids = targets.map((loan) => loan.id);
+    const updatedDebtor = debtorAfterRemovingLoanTags(d, ids);
+    if (DB.deleteLoansCascadeAndPutDebtor) {
+      await DB.deleteLoansCascadeAndPutDebtor(ids, updatedDebtor);
+    } else {
+      await DB.deleteLoansCascade(ids);
+      if (updatedDebtor !== d) await DB.put("debtors", updatedDebtor);
+    }
     await refresh();
     rerender();
     toast(`${targets.length} item hutang dihapus`, "ok");
@@ -2601,7 +3008,7 @@
     "create-debtor", "save-debtor", "create-loan", "save-loan", "create-payment",
     "del-attach", "confirm-del-debtor", "confirm-del-loan", "del-loans-do", "confirm-del-payment",
     "confirm-seed", "confirm-clear", "import-replace", "import-merge", "storage-persist",
-    "rem-snooze", "rem-ack",
+    "rem-snooze", "rem-ack", "gallery-tag-save", "gallery-delete-confirm",
   ]);
 
   $app.addEventListener("click", async (e) => {
@@ -2655,6 +3062,30 @@
       case "edit-loan": openEditLoan(id); break;
       case "add-payment": openAddPayment(loanId); break;
       case "about": openAbout(); break;
+      case "open-debtor-gallery": openDebtorGallery(debtorId); break;
+      case "debtor-gallery-filter": {
+        if (!debtorGallery) break;
+        const next = ["all", "active", "settled"].includes(el.dataset.val) ? el.dataset.val : "all";
+        debtorGallery.filter = next;
+        refreshDebtorGallery({ focusFilter: true });
+        break;
+      }
+      case "debtor-gallery-go-loan":
+        closeScrim();
+        go(`/pinjaman/${encodeURIComponent(loanId)}`);
+        break;
+      case "gallery-upload": startGalleryUpload(debtorId); break;
+      case "gallery-edit-tags": startGalleryTagEdit(debtorId, el.dataset.attachment); break;
+      case "gallery-tag-cancel": {
+        const returnDebtor = galleryDraft && galleryDraft.debtorId;
+        galleryDraft = null;
+        if (returnDebtor) openDebtorGallery(returnDebtor);
+        else closeScrim();
+        break;
+      }
+      case "gallery-tag-save": await saveGalleryDraft(); break;
+      case "gallery-delete-ask": askDeleteSharedAttachment(debtorId, el.dataset.attachment); break;
+      case "gallery-delete-confirm": await deleteSharedAttachment(debtorId, el.dataset.attachment); break;
       case "rem-snooze": await postponeReminder(debtorId, 7); break;
       case "rem-ack": await acknowledgeReminder(debtorId); break;
 
@@ -2748,6 +3179,13 @@
         const attachment = loan && Array.isArray(loan.attachments) ? loan.attachments[Number(el.dataset.idx)] : null;
         if (attachment) openAttachmentViewer(attachment.dataUrl, attachment.name || "Bukti pembayaran");
         else toast("Lampiran tidak ditemukan", "err");
+        break;
+      }
+      case "open-gallery-attachment": {
+        const debtor = byId("debtors", debtorId);
+        const attachment = galleryAttachmentsOf(debtor).find((item) => item.id === el.dataset.attachment);
+        if (attachment) openAttachmentViewer(attachment.dataUrl, attachment.name || "Bukti pembayaran");
+        else toast("Bukti galeri tidak ditemukan", "err");
         break;
       }
       case "open-sheet-attachment": {
@@ -3013,6 +3451,10 @@
     const input = event.target;
     if (input && input.id === "f-reminder-preset") {
       toggleReminderCustom();
+      return;
+    }
+    if (input && input.dataset && input.dataset.input === "gallery-loan-tag") {
+      updateGalleryTagSelection(input);
       return;
     }
     if (paySheet && paySheet.mode === "manual" && input.classList && input.classList.contains("pa-amt")) {
