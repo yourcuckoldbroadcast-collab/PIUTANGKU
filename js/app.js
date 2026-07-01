@@ -619,20 +619,23 @@
     const sharedAttachments = loanSharedAttachments(l.id);
     const localAttachmentHtml = (l.attachments || []).map((a, i) => {
       const src = safeImageSrc(a.dataUrl);
-      return src ? `<div class="attach-thumb">
-        <button type="button" class="attach-preview" data-act="open-attachment" data-loan="${escapeAttr(l.id)}" data-idx="${i}" aria-label="Buka lampiran ${i + 1} dalam tampilan besar">
-          <img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || `Lampiran ${i + 1}`)}" loading="lazy">
+      return src ? `<div class="attach-thumb receipt-loan">
+        <button type="button" class="attach-preview" data-act="open-attachment" data-loan="${escapeAttr(l.id)}" data-idx="${i}" aria-label="Buka resi pinjaman ${i + 1} dalam tampilan besar">
+          <img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || `Resi pinjaman ${i + 1}`)}" loading="lazy">
+          <span class="attach-receipt-cue loan" aria-hidden="true">Pinjaman</span>
           <span class="attach-zoom-cue" aria-hidden="true">${icon("ic-search")}</span>
         </button>
-        <button type="button" class="x" data-act="del-attach" data-loan="${escapeAttr(l.id)}" data-idx="${i}" aria-label="Hapus lampiran ${i + 1}">${icon("ic-x")}</button>
+        <button type="button" class="x" data-act="del-attach" data-loan="${escapeAttr(l.id)}" data-idx="${i}" aria-label="Hapus resi pinjaman ${i + 1}">${icon("ic-x")}</button>
       </div>` : "";
     }).join("");
     const sharedAttachmentHtml = sharedAttachments.map((a, i) => {
       const src = safeImageSrc(a.dataUrl);
-      return src ? `<div class="attach-thumb shared">
-        <button type="button" class="attach-preview" data-act="open-gallery-attachment" data-debtor="${escapeAttr(l.debtorId)}" data-attachment="${escapeAttr(a.id)}" aria-label="Buka bukti galeri ${i + 1} dalam tampilan besar">
-          <img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || `Bukti galeri ${i + 1}`)}" loading="lazy">
-          <span class="attach-shared-cue" aria-hidden="true">Galeri</span>
+      const type = normalizeReceiptType(a.receiptType);
+      const meta = receiptTypeMeta(type);
+      return src ? `<div class="attach-thumb shared receipt-${type}">
+        <button type="button" class="attach-preview" data-act="open-gallery-attachment" data-debtor="${escapeAttr(l.debtorId)}" data-attachment="${escapeAttr(a.id)}" aria-label="Buka ${escapeAttr(meta.label.toLowerCase())} ${i + 1} dalam tampilan besar">
+          <img src="${escapeAttr(src)}" alt="${escapeHtml(a.name || `${meta.label} ${i + 1}`)}" loading="lazy">
+          <span class="attach-receipt-cue ${type}" aria-hidden="true">${escapeHtml(meta.shortLabel)}</span>
           <span class="attach-zoom-cue" aria-hidden="true">${icon("ic-search")}</span>
         </button>
       </div>` : "";
@@ -641,9 +644,9 @@
       <div class="summary"><h3>Bukti / Lampiran${loanAttachmentCount(l) ? ` · ${loanAttachmentCount(l)}` : ""}</h3>
         <div class="attach-row" style="margin-top:0">
           ${localAttachmentHtml}${sharedAttachmentHtml}
-          <button class="attach-add" data-act="add-attach" data-loan="${escapeAttr(l.id)}" aria-label="Tambah bukti langsung ke hutang">${icon("ic-plus")}</button>
+          <button class="attach-add" data-act="add-attach" data-loan="${escapeAttr(l.id)}" aria-label="Tambah resi pinjaman langsung ke hutang">${icon("ic-plus")}</button>
         </div>
-        ${sharedAttachments.length ? `<div class="shared-attach-note">${icon("ic-info", 12)} Bukti berlabel Galeri disimpan satu kali dan ditautkan ke beberapa hutang. Ubah tagnya melalui Galeri Bukti debitur.</div>` : ""}
+        ${sharedAttachments.length ? `<div class="shared-attach-note">${icon("ic-info", 12)} Resi Pinjaman dan Resi Pembayaran dapat tampil berdampingan di hutang ini. Bukti dari galeri tetap disimpan satu kali dan dapat ditautkan ke beberapa hutang.</div>` : ""}
       </div>`;
 
     render(`
@@ -1291,8 +1294,22 @@
 
 
   /* ---------------------------------------------------------
-     GALERI BUKTI DEBITUR — satu gambar dapat ditautkan ke banyak hutang
+     GALERI RESI DEBITUR — satu gambar dapat ditautkan ke banyak hutang.
+     v2.0 memisahkan Resi Pinjaman dan Resi Pembayaran secara eksplisit.
      --------------------------------------------------------- */
+  const RECEIPT_TYPES = Object.freeze({
+    loan: { key: "loan", label: "Resi Pinjaman", shortLabel: "Pinjaman", hint: "Bukti ketika kreditur menyerahkan dana pinjaman kepada debitur." },
+    payment: { key: "payment", label: "Resi Pembayaran", shortLabel: "Pembayaran", hint: "Bukti ketika debitur mengembalikan sebagian atau seluruh hutangnya." },
+  });
+
+  function normalizeReceiptType(value, fallback = "payment") {
+    return value === "loan" || value === "payment" ? value : fallback;
+  }
+
+  function receiptTypeMeta(value) {
+    return RECEIPT_TYPES[normalizeReceiptType(value)] || RECEIPT_TYPES.payment;
+  }
+
   function galleryAttachmentsOf(debtor) {
     return debtor && Array.isArray(debtor.galleryAttachments) ? debtor.galleryAttachments : [];
   }
@@ -1316,7 +1333,8 @@
     if (!debtor) return [];
     return galleryAttachmentsOf(debtor)
       .filter((attachment) => Array.isArray(attachment.loanIds) && attachment.loanIds.includes(loanId))
-      .filter((attachment) => safeImageSrc(attachment.dataUrl));
+      .filter((attachment) => safeImageSrc(attachment.dataUrl))
+      .map((attachment) => ({ ...attachment, receiptType: normalizeReceiptType(attachment.receiptType) }));
   }
 
   function loanAttachmentCount(loan) {
@@ -1338,17 +1356,21 @@
         .filter((loan) => loan && byId("loans", loan.id)?.debtorId === debtorId);
       if (!loans.length) return;
       const active = loans.some((loan) => loan.active);
+      const receiptType = normalizeReceiptType(attachment.receiptType);
       items.push({
         source: "shared",
         attachmentId: attachment.id,
         src,
-        name: String(attachment.name || "Bukti pembayaran"),
+        name: String(attachment.name || receiptTypeMeta(receiptType).label),
         createdAt: attachment.createdAt || "",
         loans,
         active,
+        receiptType,
       });
     });
 
+    // Lampiran yang diunggah langsung saat membuat/mengubah hutang merupakan
+    // resi pencairan awal, sehingga selalu masuk kategori Resi Pinjaman.
     state.loans
       .filter((loan) => loan.debtorId === debtorId)
       .forEach((loan) => {
@@ -1361,10 +1383,11 @@
             loanId: loan.id,
             index,
             src,
-            name: String((attachment && attachment.name) || `Lampiran ${index + 1}`),
+            name: String((attachment && attachment.name) || `Resi pinjaman ${index + 1}`),
             createdAt: loan.createdAt || loan.date || "",
             loans: [meta],
             active: meta.active,
+            receiptType: "loan",
           });
         });
       });
@@ -1384,39 +1407,50 @@
     </button>`;
   }
 
-  function debtorGalleryInner(debtorId, filter = "all") {
+  function debtorGalleryInner(debtorId, receiptType = "payment", filter = "all") {
     const debtor = byId("debtors", debtorId);
+    const selectedType = normalizeReceiptType(receiptType);
+    const typeMeta = receiptTypeMeta(selectedType);
     const all = debtorAttachmentItems(debtorId);
-    const activeCount = all.filter((item) => item.active).length;
-    const settledCount = all.filter((item) => !item.active).length;
+    const loanReceipts = all.filter((item) => item.receiptType === "loan");
+    const paymentReceipts = all.filter((item) => item.receiptType === "payment");
+    const categoryItems = selectedType === "loan" ? loanReceipts : paymentReceipts;
+    const activeCount = categoryItems.filter((item) => item.active).length;
+    const settledCount = categoryItems.filter((item) => !item.active).length;
     const shown = filter === "active"
-      ? all.filter((item) => item.active)
+      ? categoryItems.filter((item) => item.active)
       : filter === "settled"
-        ? all.filter((item) => !item.active)
-        : all;
-    const linkedLoanCount = new Set(all.flatMap((item) => item.loans.map((loan) => loan.id))).size;
+        ? categoryItems.filter((item) => !item.active)
+        : categoryItems;
+    const linkedLoanCount = new Set(categoryItems.flatMap((item) => item.loans.map((loan) => loan.id))).size;
     const sharedCount = galleryAttachmentsOf(debtor).length;
 
+    const typeButton = (value, label, count) =>
+      `<button type="button" class="gallery-type-tab${selectedType === value ? " active" : ""}" data-act="debtor-gallery-type" data-val="${value}" aria-pressed="${selectedType === value}">
+        <span>${label}</span><strong>${count}</strong>
+      </button>`;
     const filterButton = (value, label, count) =>
       `<button type="button" class="gallery-filter${filter === value ? " active" : ""}" data-act="debtor-gallery-filter" data-val="${value}" aria-pressed="${filter === value}">${label}<span>${count}</span></button>`;
 
     const cards = shown.map((item) => {
       const statusClass = item.active ? "active" : "settled";
       const statusLabel = item.active ? "Ada hutang aktif" : "Semua lunas";
+      const meta = receiptTypeMeta(item.receiptType);
       const openData = item.source === "shared"
         ? `data-act="open-gallery-attachment" data-debtor="${escapeAttr(debtorId)}" data-attachment="${escapeAttr(item.attachmentId)}"`
         : `data-act="open-attachment" data-loan="${escapeAttr(item.loanId)}" data-idx="${item.index}"`;
       const actions = item.source === "shared"
         ? `<div class="gallery-card-actions">
-            <button type="button" data-act="gallery-edit-tags" data-debtor="${escapeAttr(debtorId)}" data-attachment="${escapeAttr(item.attachmentId)}">${icon("ic-tag", 14)} Ubah tag</button>
+            <button type="button" data-act="gallery-edit-details" data-debtor="${escapeAttr(debtorId)}" data-attachment="${escapeAttr(item.attachmentId)}">${icon("ic-edit", 14)} Ubah detail</button>
             <button type="button" class="danger" data-act="gallery-delete-ask" data-debtor="${escapeAttr(debtorId)}" data-attachment="${escapeAttr(item.attachmentId)}">${icon("ic-trash", 14)} Hapus</button>
           </div>`
         : `<div class="gallery-card-actions"><button type="button" data-act="debtor-gallery-go-loan" data-loan="${escapeAttr(item.loanId)}">Buka hutang asal</button></div>`;
-      return `<article class="gallery-card">
-        <button type="button" class="gallery-thumb" ${openData} aria-label="Buka ${escapeAttr(item.name)}">
+      return `<article class="gallery-card receipt-${item.receiptType}">
+        <button type="button" class="gallery-thumb" ${openData} aria-label="Buka ${escapeAttr(meta.label.toLowerCase())}: ${escapeAttr(item.name)}">
           <img src="${escapeAttr(item.src)}" alt="" loading="lazy">
+          <span class="gallery-receipt-badge ${item.receiptType}">${escapeHtml(meta.label)}</span>
           <span class="gallery-status ${statusClass}"><span class="dotk"></span>${statusLabel}</span>
-          ${item.source === "shared" ? `<span class="gallery-shared-badge">1 bukti · ${item.loans.length} tag</span>` : ""}
+          ${item.source === "shared" ? `<span class="gallery-shared-badge">${item.loans.length} tag hutang</span>` : `<span class="gallery-local-badge">Lampiran hutang</span>`}
           <span class="gallery-zoom" aria-hidden="true">${icon("ic-search")}</span>
         </button>
         <div class="gallery-meta">
@@ -1428,33 +1462,40 @@
     }).join("");
 
     let content;
-    if (!all.length) {
+    if (!categoryItems.length) {
       content = `<div class="gallery-empty">
-        <div class="gallery-empty-icon">${icon("ic-image")}</div>
-        <h4>Belum ada bukti pembayaran</h4>
-        <p>Unggah satu atau beberapa gambar, lalu tandai semua hutang yang dibayar oleh bukti tersebut.</p>
-        <button class="btn btn-primary sm gallery-empty-upload" data-act="gallery-upload" data-debtor="${escapeAttr(debtorId)}">${icon("ic-upload")} Unggah bukti</button>
+        <div class="gallery-empty-icon">${icon(selectedType === "loan" ? "ic-receipt" : "ic-wallet")}</div>
+        <h4>Belum ada ${escapeHtml(typeMeta.label.toLowerCase())}</h4>
+        <p>${escapeHtml(typeMeta.hint)} Unggah satu gambar sekali, lalu tandai satu atau beberapa hutang terkait.</p>
+        <button class="btn btn-primary sm gallery-empty-upload" data-act="gallery-upload" data-debtor="${escapeAttr(debtorId)}" data-receipt-type="${selectedType}">${icon("ic-upload")} Unggah ${escapeHtml(typeMeta.label)}</button>
       </div>`;
     } else if (!shown.length) {
       content = `<div class="gallery-empty compact">
         <div class="gallery-empty-icon">${icon(filter === "active" ? "ic-clock" : "ic-check-circle")}</div>
-        <h4>${filter === "active" ? "Tidak ada bukti bertag hutang aktif" : "Belum ada bukti dengan seluruh tag lunas"}</h4>
-        <p>Pilih filter lain untuk melihat bukti yang tersedia.</p>
+        <h4>${filter === "active" ? "Tidak ada resi bertag hutang aktif" : "Belum ada resi dengan seluruh tag lunas"}</h4>
+        <p>Pilih filter lain untuk melihat ${escapeHtml(typeMeta.label.toLowerCase())} yang tersedia.</p>
       </div>`;
     } else {
       content = `<div class="gallery-grid">${cards}</div>`;
     }
 
-    return `<div class="debtor-gallery" data-gallery-debtor="${escapeAttr(debtorId)}">
-      <div class="gallery-summary">
-        <div><strong>${all.length}</strong><span>bukti</span></div>
-        <div><strong>${linkedLoanCount}</strong><span>hutang ditandai</span></div>
-        <p>Satu gambar disimpan sekali dan dapat muncul di beberapa hutang melalui tag.</p>
+    return `<div class="debtor-gallery" data-gallery-debtor="${escapeAttr(debtorId)}" data-receipt-type="${selectedType}">
+      <div class="gallery-type-tabs" role="group" aria-label="Kategori utama galeri resi">
+        ${typeButton("loan", "Resi Pinjaman", loanReceipts.length)}
+        ${typeButton("payment", "Resi Pembayaran", paymentReceipts.length)}
       </div>
-      <button class="btn btn-primary gallery-upload-main" data-act="gallery-upload" data-debtor="${escapeAttr(debtorId)}"${sharedCount >= MAX_GALLERY_ATTACHMENTS ? " disabled" : ""}>${icon("ic-upload")} Unggah bukti & tandai hutang</button>
+      <div class="gallery-category-note ${selectedType}">
+        <strong>${escapeHtml(typeMeta.label)}</strong><span>${escapeHtml(typeMeta.hint)}</span>
+      </div>
+      <div class="gallery-summary">
+        <div><strong>${categoryItems.length}</strong><span>resi pada kategori</span></div>
+        <div><strong>${linkedLoanCount}</strong><span>hutang ditandai</span></div>
+        <p>Kategori utama memisahkan arah transaksi. Tag menentukan resi muncul pada hutang mana.</p>
+      </div>
+      <button class="btn btn-primary gallery-upload-main" data-act="gallery-upload" data-debtor="${escapeAttr(debtorId)}" data-receipt-type="${selectedType}"${sharedCount >= MAX_GALLERY_ATTACHMENTS ? " disabled" : ""}>${icon("ic-upload")} Unggah ${escapeHtml(typeMeta.label)}</button>
       ${sharedCount >= MAX_GALLERY_ATTACHMENTS ? `<div class="gallery-limit-note">Batas ${MAX_GALLERY_ATTACHMENTS} bukti bersama per debitur telah tercapai.</div>` : ""}
-      <div class="gallery-filters" role="group" aria-label="Filter status hutang">
-        ${filterButton("all", "Semua", all.length)}
+      <div class="gallery-filters" role="group" aria-label="Filter status hutang pada ${escapeAttr(typeMeta.label)}">
+        ${filterButton("all", "Semua", categoryItems.length)}
         ${filterButton("active", "Aktif", activeCount)}
         ${filterButton("settled", "Lunas", settledCount)}
       </div>
@@ -1462,21 +1503,35 @@
     </div>`;
   }
 
-  function openDebtorGallery(debtorId, filter = "all") {
-    const debtor = byId("debtors", debtorId);
-    if (!debtor) return;
-    debtorGallery = { debtorId, filter: ["all", "active", "settled"].includes(filter) ? filter : "all" };
-    openSheet("Galeri Bukti", debtorGalleryInner(debtorId, debtorGallery.filter));
+  function preferredGalleryReceiptType(debtorId) {
+    const items = debtorAttachmentItems(debtorId);
+    if (items.some((item) => item.receiptType === "payment")) return "payment";
+    if (items.some((item) => item.receiptType === "loan")) return "loan";
+    return "payment";
   }
 
-  function refreshDebtorGallery({ focusFilter = false } = {}) {
+  function openDebtorGallery(debtorId, receiptType = null, filter = "all") {
+    const debtor = byId("debtors", debtorId);
+    if (!debtor) return;
+    debtorGallery = {
+      debtorId,
+      receiptType: receiptType == null ? preferredGalleryReceiptType(debtorId) : normalizeReceiptType(receiptType),
+      filter: ["all", "active", "settled"].includes(filter) ? filter : "all",
+    };
+    openSheet("Galeri Resi", debtorGalleryInner(debtorId, debtorGallery.receiptType, debtorGallery.filter));
+  }
+
+  function refreshDebtorGallery({ focusFilter = false, focusType = false } = {}) {
     if (!debtorGallery) return;
     const host = $app.querySelector(".debtor-gallery");
     if (!host) return;
-    const filter = debtorGallery.filter;
-    host.outerHTML = debtorGalleryInner(debtorGallery.debtorId, filter);
+    host.outerHTML = debtorGalleryInner(debtorGallery.debtorId, debtorGallery.receiptType, debtorGallery.filter);
     if (focusFilter) {
-      const button = Array.from($app.querySelectorAll(".gallery-filter")).find((item) => item.dataset.val === filter);
+      const button = Array.from($app.querySelectorAll(".gallery-filter")).find((item) => item.dataset.val === debtorGallery.filter);
+      button?.focus();
+    }
+    if (focusType) {
+      const button = Array.from($app.querySelectorAll(".gallery-type-tab")).find((item) => item.dataset.val === debtorGallery.receiptType);
       button?.focus();
     }
   }
@@ -1504,6 +1559,7 @@
     const debtor = byId("debtors", galleryDraft.debtorId);
     const choices = galleryLoanChoices(galleryDraft.debtorId);
     const selected = galleryDraft.selectedLoanIds;
+    const selectedType = normalizeReceiptType(galleryDraft.receiptType);
     const rows = choices.map((loan) => {
       const checked = selected.has(loan.id);
       const after = loan.active ? `Sisa ${rupiah(loan.remaining)}` : "Lunas";
@@ -1515,27 +1571,38 @@
       </label>`;
     }).join("");
     const count = selected.size;
-    const title = galleryDraft.mode === "edit" ? "Ubah tag bukti" : `Tandai ${galleryDraft.attachments.length} bukti`;
+    const title = galleryDraft.mode === "edit" ? "Ubah detail bukti" : `Atur ${galleryDraft.attachments.length} bukti`;
+    const typeOption = (value) => {
+      const meta = receiptTypeMeta(value);
+      return `<button type="button" class="gallery-type-option ${value}${selectedType === value ? " active" : ""}" data-act="gallery-receipt-type" data-val="${value}" aria-pressed="${selectedType === value}">
+        <span class="gallery-type-option-icon">${icon(value === "loan" ? "ic-receipt" : "ic-wallet")}</span>
+        <span><strong>${escapeHtml(meta.label)}</strong><small>${escapeHtml(meta.hint)}</small></span>
+      </button>`;
+    };
     return `<div class="gallery-tag-editor" data-gallery-tag-editor>
       <div class="gallery-tag-intro">
         <div class="gallery-tag-intro-icon">${icon("ic-tag")}</div>
-        <div><strong>${escapeHtml(title)}</strong><p>Pilih satu atau beberapa hutang ${escapeHtml(debtor ? debtor.name : "debitur")}. Gambar disimpan satu kali, lalu ditampilkan pada seluruh hutang yang dipilih.</p></div>
+        <div><strong>${escapeHtml(title)}</strong><p>Tentukan jenis transaksi, lalu pilih hutang yang harus menampilkan gambar ini. File tetap disimpan satu kali.</p></div>
+      </div>
+      <div class="gallery-editor-label">Jenis resi</div>
+      <div class="gallery-type-options" role="group" aria-label="Jenis resi">
+        ${typeOption("loan")}${typeOption("payment")}
       </div>
       <div class="gallery-tag-summary"><span>Hutang dipilih</span><strong id="gallery-tag-count">${count}</strong></div>
       <div class="gallery-tag-list">${rows || `<div class="gallery-empty compact"><h4>Belum ada hutang</h4><p>Tambahkan hutang terlebih dahulu sebelum menandai bukti.</p></div>`}</div>
       <div class="gallery-tag-actions">
         <button class="btn btn-ghost" data-act="gallery-tag-cancel">Batal</button>
-        <button class="btn btn-primary" id="gallery-tag-save" data-act="gallery-tag-save"${count ? "" : " disabled"}>${icon("ic-check")} ${galleryDraft.mode === "edit" ? "Simpan tag" : "Simpan bukti"}</button>
+        <button class="btn btn-primary" id="gallery-tag-save" data-act="gallery-tag-save"${count ? "" : " disabled"}>${icon("ic-check")} ${galleryDraft.mode === "edit" ? "Simpan detail" : "Simpan bukti"}</button>
       </div>
     </div>`;
   }
 
   function openGalleryTagEditor() {
     if (!galleryDraft) return;
-    openSheet(galleryDraft.mode === "edit" ? "Ubah Tag Hutang" : "Tandai Hutang", galleryTagEditorInner());
+    openSheet(galleryDraft.mode === "edit" ? "Ubah Detail Bukti" : "Tambah Bukti", galleryTagEditorInner());
   }
 
-  function startGalleryUpload(debtorId) {
+  function startGalleryUpload(debtorId, requestedType = "payment") {
     const debtor = byId("debtors", debtorId);
     if (!debtor) return;
     const choices = galleryLoanChoices(debtorId);
@@ -1543,36 +1610,57 @@
     const existing = galleryAttachmentsOf(debtor).length;
     const room = Math.max(0, MAX_GALLERY_ATTACHMENTS - existing);
     if (!room) { toast(`Maksimal ${MAX_GALLERY_ATTACHMENTS} bukti bersama per debitur`, "err"); return; }
+    const receiptType = normalizeReceiptType(requestedType);
     pickFile("image/*", true, async (files) => {
       if (!files.length) return;
       const attachments = [];
       for (const file of files.slice(0, room)) {
         try {
           const attachment = await attachmentFromFile(file);
-          attachments.push({ ...attachment, id: Calc.uid(), createdAt: new Date().toISOString(), loanIds: [] });
+          attachments.push({ ...attachment, id: Calc.uid(), createdAt: new Date().toISOString(), loanIds: [], receiptType });
         } catch (error) {
           toast(userErrorMessage(error), "err");
         }
       }
       if (files.length > room) toast(`Hanya ${room} gambar diproses karena batas galeri`, "err");
       if (!attachments.length) return;
-      galleryDraft = { mode: "create", debtorId, attachments, selectedLoanIds: new Set() };
+      galleryDraft = {
+        mode: "create",
+        debtorId,
+        attachments,
+        selectedLoanIds: new Set(),
+        receiptType,
+        returnReceiptType: debtorGallery?.receiptType || receiptType,
+      };
       openGalleryTagEditor();
     });
   }
 
-  function startGalleryTagEdit(debtorId, attachmentId) {
+  function startGalleryDetailEdit(debtorId, attachmentId) {
     const debtor = byId("debtors", debtorId);
     const attachment = galleryAttachmentsOf(debtor).find((item) => item.id === attachmentId);
     if (!attachment) { toast("Bukti tidak ditemukan", "err"); return; }
+    const receiptType = normalizeReceiptType(attachment.receiptType);
     galleryDraft = {
       mode: "edit",
       debtorId,
       attachmentId,
-      attachments: [attachment],
+      attachments: [{ ...attachment, receiptType }],
       selectedLoanIds: new Set(Array.isArray(attachment.loanIds) ? attachment.loanIds : []),
+      receiptType,
+      returnReceiptType: debtorGallery?.receiptType || receiptType,
     };
     openGalleryTagEditor();
+  }
+
+  function updateGalleryReceiptType(value) {
+    if (!galleryDraft) return;
+    galleryDraft.receiptType = normalizeReceiptType(value);
+    $app.querySelectorAll(".gallery-type-option").forEach((button) => {
+      const active = button.dataset.val === galleryDraft.receiptType;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
   }
 
   function updateGalleryTagSelection(input) {
@@ -1596,11 +1684,14 @@
     const validLoanIds = new Set(state.loans.filter((loan) => loan.debtorId === debtor.id).map((loan) => loan.id));
     const loanIds = Array.from(galleryDraft.selectedLoanIds).filter((id) => validLoanIds.has(id));
     if (!loanIds.length) { toast("Hutang yang dipilih tidak lagi tersedia", "err"); return; }
+    const receiptType = normalizeReceiptType(galleryDraft.receiptType);
     let next = galleryAttachmentsOf(debtor).slice();
     if (galleryDraft.mode === "edit") {
-      next = next.map((attachment) => attachment.id === galleryDraft.attachmentId ? { ...attachment, loanIds } : attachment);
+      next = next.map((attachment) => attachment.id === galleryDraft.attachmentId
+        ? { ...attachment, loanIds, receiptType }
+        : attachment);
     } else {
-      const additions = galleryDraft.attachments.map((attachment) => ({ ...attachment, loanIds: loanIds.slice() }));
+      const additions = galleryDraft.attachments.map((attachment) => ({ ...attachment, loanIds: loanIds.slice(), receiptType }));
       if (next.length + additions.length > MAX_GALLERY_ATTACHMENTS) {
         toast(`Maksimal ${MAX_GALLERY_ATTACHMENTS} bukti bersama per debitur`, "err");
         return;
@@ -1610,10 +1701,10 @@
     try {
       await DB.put("debtors", { ...debtor, galleryAttachments: next });
       const debtorId = debtor.id;
-      const message = galleryDraft.mode === "edit" ? "Tag hutang diperbarui" : `${galleryDraft.attachments.length} bukti ditambahkan`;
+      const message = galleryDraft.mode === "edit" ? "Detail bukti diperbarui" : `${galleryDraft.attachments.length} bukti ditambahkan`;
       galleryDraft = null;
       await refresh();
-      openDebtorGallery(debtorId);
+      openDebtorGallery(debtorId, receiptType, "all");
       toast(message, "ok");
     } catch (error) {
       toast(userErrorMessage(error), "err");
@@ -1624,7 +1715,7 @@
     openDialog({
       icon: "ic-trash",
       title: "Hapus bukti dari galeri?",
-      msg: "Bukti akan hilang dari galeri dan dari seluruh hutang yang ditandai. Gambar hanya disimpan satu kali, jadi tindakan ini berlaku ke semua tag.",
+      msg: "Bukti akan hilang dari kategori galeri dan dari seluruh hutang yang ditandai. Gambar hanya disimpan satu kali, jadi tindakan ini berlaku ke semua tag.",
       confirmLabel: "Hapus Bukti",
       act: "gallery-delete-confirm",
       data: `data-debtor="${escapeAttr(debtorId)}" data-attachment="${escapeAttr(attachmentId)}"`,
@@ -1638,7 +1729,7 @@
     await DB.put("debtors", { ...debtor, galleryAttachments: next });
     await refresh();
     rerender();
-    toast("Bukti dihapus dari seluruh tag hutang", "ok");
+    toast("Bukti dihapus dari galeri dan seluruh tag hutang", "ok");
   }
 
   function debtorAfterRemovingLoanTags(debtor, loanIds) {
@@ -1648,12 +1739,13 @@
     const next = current
       .map((attachment) => ({
         ...attachment,
+        receiptType: normalizeReceiptType(attachment.receiptType),
         loanIds: Array.from(new Set((Array.isArray(attachment.loanIds) ? attachment.loanIds : []).filter((id) => !removed.has(id)))),
       }))
       .filter((attachment) => attachment.loanIds.length > 0);
     const changed = next.length !== current.length || next.some((attachment, index) => {
       const before = current[index];
-      return !before || attachment.loanIds.join("|") !== (before.loanIds || []).join("|");
+      return !before || attachment.loanIds.join("|") !== (before.loanIds || []).join("|") || attachment.receiptType !== before.receiptType;
     });
     return changed ? { ...debtor, galleryAttachments: next } : debtor;
   }
@@ -2556,7 +2648,7 @@
       <div class="center" style="padding:6px 4px 10px">
         <img src="icons/icon-192.png" alt="" style="width:72px;height:72px;border-radius:20px;margin:0 auto 12px;box-shadow:var(--sh-md)">
         <h3 style="font-size:19px;font-weight:800;color:var(--ink)">PiutangKu</h3>
-        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v1.9</p>
+        <p class="muted" style="font-size:13px;margin-top:4px">Buku piutang digital · v2.0</p>
       </div>
       <p style="font-size:13.5px;color:var(--text);line-height:1.6;margin:6px 2px">
         Aplikasi sederhana untuk mencatat siapa yang masih berutang kepadamu dan berapa sisanya.
@@ -3062,7 +3154,14 @@
       case "edit-loan": openEditLoan(id); break;
       case "add-payment": openAddPayment(loanId); break;
       case "about": openAbout(); break;
-      case "open-debtor-gallery": openDebtorGallery(debtorId); break;
+      case "open-debtor-gallery": openDebtorGallery(debtorId, null, "all"); break;
+      case "debtor-gallery-type": {
+        if (!debtorGallery) break;
+        debtorGallery.receiptType = normalizeReceiptType(el.dataset.val);
+        debtorGallery.filter = "all";
+        refreshDebtorGallery({ focusType: true });
+        break;
+      }
       case "debtor-gallery-filter": {
         if (!debtorGallery) break;
         const next = ["all", "active", "settled"].includes(el.dataset.val) ? el.dataset.val : "all";
@@ -3074,12 +3173,14 @@
         closeScrim();
         go(`/pinjaman/${encodeURIComponent(loanId)}`);
         break;
-      case "gallery-upload": startGalleryUpload(debtorId); break;
-      case "gallery-edit-tags": startGalleryTagEdit(debtorId, el.dataset.attachment); break;
+      case "gallery-upload": startGalleryUpload(debtorId, el.dataset.receiptType || debtorGallery?.receiptType || "payment"); break;
+      case "gallery-edit-details": startGalleryDetailEdit(debtorId, el.dataset.attachment); break;
+      case "gallery-receipt-type": updateGalleryReceiptType(el.dataset.val); break;
       case "gallery-tag-cancel": {
         const returnDebtor = galleryDraft && galleryDraft.debtorId;
+        const returnType = galleryDraft && galleryDraft.returnReceiptType;
         galleryDraft = null;
-        if (returnDebtor) openDebtorGallery(returnDebtor);
+        if (returnDebtor) openDebtorGallery(returnDebtor, returnType || "payment", "all");
         else closeScrim();
         break;
       }
@@ -3177,20 +3278,20 @@
       case "open-attachment": {
         const loan = byId("loans", loanId);
         const attachment = loan && Array.isArray(loan.attachments) ? loan.attachments[Number(el.dataset.idx)] : null;
-        if (attachment) openAttachmentViewer(attachment.dataUrl, attachment.name || "Bukti pembayaran");
+        if (attachment) openAttachmentViewer(attachment.dataUrl, attachment.name || "Resi Pinjaman");
         else toast("Lampiran tidak ditemukan", "err");
         break;
       }
       case "open-gallery-attachment": {
         const debtor = byId("debtors", debtorId);
         const attachment = galleryAttachmentsOf(debtor).find((item) => item.id === el.dataset.attachment);
-        if (attachment) openAttachmentViewer(attachment.dataUrl, attachment.name || "Bukti pembayaran");
+        if (attachment) openAttachmentViewer(attachment.dataUrl, attachment.name || receiptTypeMeta(attachment.receiptType).label);
         else toast("Bukti galeri tidak ditemukan", "err");
         break;
       }
       case "open-sheet-attachment": {
         const attachment = sheetAttachments[Number(el.dataset.idx)];
-        if (attachment) openAttachmentViewer(attachment.dataUrl, attachment.name || "Bukti pembayaran");
+        if (attachment) openAttachmentViewer(attachment.dataUrl, attachment.name || "Resi Pinjaman");
         else toast("Lampiran tidak ditemukan", "err");
         break;
       }
@@ -3498,6 +3599,21 @@
     const snapshot = await DB.snapshot();
     const validation = Calc.validateImport(snapshot);
     if (!validation.ok) throw new Error(`Data lokal tidak konsisten: ${validation.error}`);
+
+    // Migrasi v1.9 -> v2.0 bersifat aditif: hanya menambahkan receiptType pada
+    // bukti galeri lama. Data URL, nama, waktu, ID, dan seluruh loanIds dipertahankan.
+    const migratedDebtors = [];
+    snapshot.debtors.forEach((debtor) => {
+      if (!Array.isArray(debtor.galleryAttachments)) return;
+      let changed = false;
+      const galleryAttachments = debtor.galleryAttachments.map((attachment) => {
+        if (!attachment || (attachment.receiptType === "loan" || attachment.receiptType === "payment")) return attachment;
+        changed = true;
+        return { ...attachment, receiptType: "payment" };
+      });
+      if (changed) migratedDebtors.push({ ...debtor, galleryAttachments });
+    });
+    if (migratedDebtors.length) await DB.putMany("debtors", migratedDebtors);
     state = validation.data;
   }
 

@@ -1048,3 +1048,52 @@ body.dragging-active{user-select:none;-webkit-user-select:none;cursor:grabbing;}
   .gallery-tag-state{display:none;}
   .gallery-card-actions{flex-direction:column;}
 }
+
+
+/* ---------------- Galeri resi terpisah (v2.0) ---------------- */
+.gallery-type-tabs{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:2px 0 10px;}
+.gallery-type-tab{min-width:0;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 13px;
+  border:1.5px solid var(--line-strong);border-radius:var(--r-sm);background:#fff;color:var(--muted);font-size:11.5px;font-weight:800;text-align:left;}
+.gallery-type-tab span{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.gallery-type-tab strong{min-width:25px;height:25px;padding:0 7px;border-radius:13px;display:grid;place-items:center;background:var(--line);color:var(--text);font-size:11px;}
+.gallery-type-tab.active{border-color:var(--mint-300);background:var(--mint-50);color:var(--mint-700);box-shadow:0 0 0 3px rgba(84,189,154,.08);}
+.gallery-type-tab.active strong{background:#fff;color:var(--mint-700);}
+.gallery-category-note{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border-radius:var(--r-sm);margin-bottom:10px;border:1px solid transparent;}
+.gallery-category-note strong{font-size:12px;color:var(--ink);}
+.gallery-category-note span{font-size:10.5px;line-height:1.45;color:var(--muted);}
+.gallery-category-note.loan{background:var(--lav-50);border-color:var(--lav-100);}
+.gallery-category-note.payment{background:var(--mint-50);border-color:var(--mint-100);}
+.gallery-receipt-badge{position:absolute;left:8px;top:8px;max-width:calc(100% - 16px);padding:4px 8px;border-radius:var(--pill);
+  font-size:9px;font-weight:800;box-shadow:var(--sh-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.gallery-receipt-badge.loan{background:rgba(242,241,255,.96);color:var(--lav-700);}
+.gallery-receipt-badge.payment{background:rgba(231,246,238,.96);color:var(--pos);}
+.gallery-status{top:36px;}
+.gallery-local-badge{position:absolute;left:8px;bottom:8px;padding:4px 7px;border-radius:var(--pill);
+  background:rgba(104,98,201,.82);color:#fff;font-size:9px;font-weight:700;backdrop-filter:blur(4px);}
+.gallery-card.receipt-loan{box-shadow:0 0 0 1px var(--lav-100),var(--sh-xs);}
+.gallery-card.receipt-payment{box-shadow:0 0 0 1px var(--mint-100),var(--sh-xs);}
+
+.gallery-editor-label{font-size:11.5px;font-weight:800;color:var(--muted);margin:14px 2px 8px;}
+.gallery-type-options{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.gallery-type-option{min-width:0;display:flex;align-items:flex-start;gap:9px;padding:11px;border:1.5px solid var(--line-strong);border-radius:var(--r-sm);background:#fff;text-align:left;}
+.gallery-type-option-icon{width:32px;height:32px;border-radius:10px;display:grid;place-items:center;flex:none;background:var(--line);color:var(--muted);}
+.gallery-type-option-icon svg{width:17px;height:17px;}
+.gallery-type-option>span:last-child{min-width:0;display:flex;flex-direction:column;}
+.gallery-type-option strong{font-size:11.5px;color:var(--ink);}
+.gallery-type-option small{font-size:9.5px;color:var(--muted);line-height:1.35;margin-top:2px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
+.gallery-type-option.loan.active{border-color:var(--lav-300);background:var(--lav-50);}
+.gallery-type-option.loan.active .gallery-type-option-icon{background:var(--lav-100);color:var(--lav-700);}
+.gallery-type-option.payment.active{border-color:var(--mint-300);background:var(--mint-50);}
+.gallery-type-option.payment.active .gallery-type-option-icon{background:var(--mint-100);color:var(--mint-700);}
+
+.attach-receipt-cue{position:absolute;left:4px;bottom:4px;max-width:calc(100% - 8px);padding:2px 5px;border-radius:var(--pill);
+  color:#fff;font-size:7.5px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;backdrop-filter:blur(4px);}
+.attach-receipt-cue.loan{background:rgba(104,98,201,.86);}
+.attach-receipt-cue.payment{background:rgba(46,126,92,.88);}
+.attach-thumb.receipt-loan{box-shadow:0 0 0 2px var(--lav-100),var(--sh-xs);}
+.attach-thumb.shared.receipt-payment{box-shadow:0 0 0 2px var(--mint-200),var(--sh-xs);}
+
+@media (max-width:360px){
+  .gallery-type-tabs,.gallery-type-options{grid-template-columns:1fr;}
+  .gallery-status{display:none;}
+}

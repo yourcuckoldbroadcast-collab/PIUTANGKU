@@ -5,7 +5,7 @@
 const Calc = (() => {
   const DAY = 86400000;
   const MAX_MONEY = 1_000_000_000_000_000;
-  const BACKUP_VERSION = 3;
+  const BACKUP_VERSION = 4;
   const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
   function dateValue(v) {
@@ -527,6 +527,13 @@ const Calc = (() => {
           loanIds.push(loanId);
         }
         galleryIds.add(attachmentId);
+        const rawReceiptType = attachment.receiptType;
+        if (rawReceiptType != null && rawReceiptType !== "" && !["loan", "payment"].includes(rawReceiptType)) {
+          return failImport(`Jenis resi pada bukti galeri ke-${j + 1} milik “${name}” tidak valid.`);
+        }
+        // Migrasi cadangan v1.9: bukti galeri lama dibuat khusus untuk pembayaran,
+        // sehingga field yang belum ada dipetakan aman ke "payment" tanpa mengubah gambar/tag.
+        const receiptType = rawReceiptType === "loan" ? "loan" : "payment";
         galleryAttachments.push({
           id: attachmentId,
           name: attachmentName,
@@ -534,6 +541,7 @@ const Calc = (() => {
           dataUrl: image.value,
           createdAt: created,
           loanIds,
+          receiptType,
         });
       }
       normalized.galleryAttachments = [];
